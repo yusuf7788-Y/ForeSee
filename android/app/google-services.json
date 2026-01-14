@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "367183399858",
+    "project_id": "foresee-83b88",
+    "storage_bucket": "foresee-83b88.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:367183399858:android:9ac549b6ccaa7e884fb2ab",
+        "android_client_info": {
+          "package_name": "com.ufine.foresee"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-dKnjPqNpJkhF5upKGGioK_jblMCxCCM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

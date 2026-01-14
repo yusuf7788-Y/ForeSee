@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <!-- İç renk: koyu gri, uygulamadaki balonlara daha yakın -->
+    <solid android:color="#FF1A1A1A" />
+    <!-- Pill görünüm -->
+    <corners android:radius="999dp" />
+    <!-- Dış çizgi inceltildi -->
+    <stroke
+        android:width="1dp"
+        android:color="#FFFFFFFF" />
+</shape>
