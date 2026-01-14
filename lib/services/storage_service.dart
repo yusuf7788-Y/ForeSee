@@ -27,6 +27,8 @@ class StorageService {
   static const String _playerInventoryKey = 'player_inventory';
   static const String _lockMemoryAiKey = 'lock_memory_ai';
   static const String _lockPromptAiKey = 'lock_prompt_ai';
+  static const String _currentInputKey = 'current_input';
+  static const String _currentTabKey = 'current_tab';
 
   Future<bool> getLockMemoryAi() async {
     final prefs = await SharedPreferences.getInstance();
@@ -303,5 +305,26 @@ class StorageService {
     for (final k in keysToRemove) stats.remove(k);
 
     await prefs.setString(_weeklyUsageKey, jsonEncode(stats));
+  }
+
+  // Input ve Tab yönetimi için yeni metotlar
+  Future<String> getCurrentInput() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_currentInputKey) ?? '';
+  }
+
+  Future<void> saveCurrentInput(String input) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_currentInputKey, input);
+  }
+
+  Future<int> getCurrentTab() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(_currentTabKey) ?? 0;
+  }
+
+  Future<void> saveCurrentTab(int tab) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_currentTabKey, tab);
   }
 }
