@@ -14,11 +14,11 @@ class Chat {
   final int? projectColor; // ARGB renk değeri
   final String? projectIcon; // İleride ikon anahtarı için
   final List<Map<String, dynamic>>?
-  projectTasks; // Bu sohbete ait TODO görevleri
+      projectTasks; // Bu sohbete ait TODO görevleri
   final DateTime? deletedAt; // Yumuşak silme için tarih
   final bool isPinned; // Sohbeti üste sabitlemek için
   final List<Map<String, dynamic>>?
-  summaryCards; // Sohbet özet kartları (metin + JSON)
+      summaryCards; // Sohbet özet kartları (metin + JSON)
   final bool isGroup;
   final String? groupId; // Eğer isGroup true ise, Firestore'daki grup ID
   final String? createdBy;
@@ -40,11 +40,6 @@ class Chat {
     this.deletedAt,
     this.isPinned = false,
     this.summaryCards,
-    this.isGroup = false,
-    this.groupId,
-    this.createdBy,
-    this.admins,
-    this.memberDetails,
   });
 
   Map<String, dynamic> toJson() {
@@ -63,11 +58,6 @@ class Chat {
       'deletedAt': deletedAt?.toIso8601String(),
       'isPinned': isPinned,
       'summaryCards': summaryCards,
-      'isGroup': isGroup,
-      'groupId': groupId,
-      'createdBy': createdBy,
-      'admins': admins,
-      'memberDetails': memberDetails,
     };
   }
 
@@ -111,13 +101,6 @@ class Chat {
                 : <String, dynamic>{'raw': e.toString()},
           )
           .toList(),
-      isGroup: json['isGroup'] ?? false,
-      groupId: json['groupId'],
-      createdBy: json['createdBy'],
-      admins: (json['admins'] as List?)?.map((e) => e.toString()).toList(),
-      memberDetails: (json['memberDetails'] as List?)
-          ?.map((e) => Map<String, dynamic>.from(e as Map))
-          .toList(),
     );
   }
 
@@ -136,11 +119,6 @@ class Chat {
     DateTime? deletedAt,
     bool? isPinned,
     List<Map<String, dynamic>>? summaryCards,
-    bool? isGroup,
-    String? groupId,
-    String? createdBy,
-    List<String>? admins,
-    List<Map<String, dynamic>>? memberDetails,
   }) {
     return Chat(
       id: id ?? this.id,
@@ -157,11 +135,6 @@ class Chat {
       deletedAt: deletedAt ?? this.deletedAt,
       isPinned: isPinned ?? this.isPinned,
       summaryCards: summaryCards ?? this.summaryCards,
-      isGroup: isGroup ?? this.isGroup,
-      groupId: groupId ?? this.groupId,
-      createdBy: createdBy ?? this.createdBy,
-      admins: admins ?? this.admins,
-      memberDetails: memberDetails ?? this.memberDetails,
     );
   }
 }
