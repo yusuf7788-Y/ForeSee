@@ -14,15 +14,6 @@
 
 **ForeSee**, Ufine çatısı altında geliştirilmiş, üretkenliği ve yapay zeka deneyimini tek bir çatı altında toplayan kapsamlı bir platformdur.
 
-### Temel Özellikler
-
-- **Çoklu AI Desteği:** OpenRouter entegrasyonu ile dünyanın en güçlü modellerine (ve yerel Llama desteğine) erişim.
-- **Gelişmiş Sohbet Deneyimi:** Dosya ekleme, görsel analizi ve derinlikli sohbet yönetimi.
-- **Yapay Zeka Destekli Araçlar:** Görsel oluşturma (Pollinations), sesli asistan (ElevenLabs) ve metin analizi.
-- **Entegrasyonlar:** GitHub, Gmail, Outlook ve Takvim servisleri ile tam uyum.
-- **Dahili Araçlar:** Dahili web tarayıcısı, gelişmiş arama motoru seçicisi ve mini oyunlar (2048, Hafıza Oyunu).
-- **Güvenlik ve Özelleştirme:** AES şifreli `.fsa` dosya sistemi, biyometrik kilit ve dinamik tema sistemi.
-
 **Dikkat: Bu depo (repository) içerisindeki kodlar "Olduğu Gibi" paylaşılmıştır.**
 
 ### Bilmeniz Gerekenler
