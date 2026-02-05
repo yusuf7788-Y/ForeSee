@@ -7,6 +7,7 @@ class UserProfile {
   final String? profileImagePath;
   final int colorValue;
   final String email;
+  final bool enableTabs;
 
   Color get profileColor => Color(colorValue);
 
@@ -17,6 +18,7 @@ class UserProfile {
     this.profileImagePath,
     int? colorValue,
     this.email = '',
+    this.enableTabs = false,
   }) : colorValue = colorValue ?? _generateColorValue();
 
   static int _generateColorValue() {
@@ -44,6 +46,7 @@ class UserProfile {
       'profileImagePath': profileImagePath,
       'colorValue': colorValue,
       'email': email,
+      'enableTabs': enableTabs,
     };
   }
 
@@ -55,6 +58,7 @@ class UserProfile {
       profileImagePath: json['profileImagePath'],
       colorValue: json['colorValue'],
       email: json['email'] ?? '',
+      enableTabs: json['enableTabs'] ?? false,
     );
   }
 
@@ -65,6 +69,7 @@ class UserProfile {
     String? profileImagePath,
     int? colorValue,
     String? email,
+    bool? enableTabs,
   }) {
     return UserProfile(
       name: name ?? this.name,
@@ -73,6 +78,7 @@ class UserProfile {
       profileImagePath: profileImagePath ?? this.profileImagePath,
       colorValue: colorValue ?? this.colorValue,
       email: email ?? this.email,
+      enableTabs: enableTabs ?? this.enableTabs,
     );
   }
 }

@@ -108,8 +108,7 @@ class _MainTabScreenState extends State<MainTabScreen>
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(25),
                 ),
-                child: AnimatedSwitch(
-                  duration: const Duration(milliseconds: 200),
+                child: Switch(
                   value: _logoVisible,
                   onChanged: (value) {
                     setState(() {
@@ -117,9 +116,6 @@ class _MainTabScreenState extends State<MainTabScreen>
                     });
                   },
                   activeColor: Theme.of(context).primaryColor,
-                  inactiveColor: Colors.grey,
-                  activeThumbImage: AssetImage('assets/logo.png'),
-                  inactiveThumbImage: null,
                 ),
               ),
             ),
@@ -252,7 +248,7 @@ class _MainTabScreenState extends State<MainTabScreen>
                   animation: const AlwaysStoppedAnimation<double>(0),
                   builder: (context, child) {
                     return AnimatedOpacity(
-                      opacity: 0.3 + (child * 0.1),
+                      opacity: 0.3,
                       duration: const Duration(milliseconds: 500),
                       child: Text(
                         'Yeni sohbet',

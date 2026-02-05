@@ -12,6 +12,9 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:android_intent_plus/android_intent.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
+import '../services/notification_service.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:markdown/markdown.dart' as md;
 import '../models/message.dart';
 import '../screens/webview_screen.dart';
 import '../screens/mini_games_hub_screen.dart';
@@ -19,8 +22,54 @@ import '../services/theme_service.dart';
 import 'code_block.dart';
 import 'fullscreen_image_viewer.dart';
 import 'grey_notification.dart';
+import 'package:flutter_math_fork/flutter_math.dart';
+import 'citation_link_builder.dart';
 import 'phone_number_panel.dart';
-import 'multi_answer_switcher.dart';
+import 'tool_result_box.dart';
+
+// LaTeX Support Classes
+class LatexSyntax extends md.InlineSyntax {
+  LatexSyntax() : super(r'(\$\$[\s\S]*?\$\$)|(\$[\s\S]*?\$)');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    final text = match.group(0)!;
+    parser.addNode(md.Element('latex', [md.Text(text)]));
+    return true;
+  }
+}
+
+class LatexBuilder extends MarkdownElementBuilder {
+  final BuildContext context;
+  LatexBuilder(this.context);
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final text = element.textContent;
+    final isDisplayMode = text.startsWith(r'$$');
+    final formula = text.replaceAll(r'$', '').trim();
+
+    try {
+      return Padding(
+        padding: EdgeInsets.symmetric(vertical: isDisplayMode ? 12 : 0),
+        child: Math.tex(
+          formula,
+          mathStyle: isDisplayMode ? MathStyle.display : MathStyle.text,
+          textStyle: preferredStyle?.copyWith(
+            fontSize:
+                (preferredStyle.fontSize ?? 15) * (isDisplayMode ? 1.1 : 1.0),
+          ),
+          onErrorFallback: (err) => Text(
+            text,
+            style: preferredStyle?.copyWith(color: Colors.redAccent),
+          ),
+        ),
+      );
+    } catch (e) {
+      return Text(text, style: preferredStyle);
+    }
+  }
+}
 
 class MessageBubble extends StatefulWidget {
   final Message message;
@@ -46,6 +95,22 @@ class MessageBubble extends StatefulWidget {
   final void Function(Message message, int index)? onAlternativeSelected;
   final String? reasoning;
   final VoidCallback? onShowReasoning;
+  final void Function(Message message, Map<String, dynamic> toolData)?
+  onToolApproval;
+  // Audio Params
+  final bool isPlayingAudio;
+  final bool isAudioLoading;
+  final VoidCallback? onPlay;
+  final VoidCallback? onStop;
+  final ValueNotifier<String>? streamingContent;
+  final bool showAudioButton;
+  final void Function(
+    String code,
+    String language,
+    String title,
+    bool isPreview,
+  )?
+  onOpenArtifact;
 
   const MessageBubble({
     super.key,
@@ -72,17 +137,28 @@ class MessageBubble extends StatefulWidget {
     this.onAlternativeSelected,
     this.reasoning,
     this.onShowReasoning,
+    this.onToolApproval,
+    this.isPlayingAudio = false,
+    this.isAudioLoading = false,
+    this.onPlay,
+    this.onStop,
+    this.streamingContent,
+    this.showAudioButton = true,
+    this.onOpenArtifact,
   });
 
   @override
   State<MessageBubble> createState() => _MessageBubbleState();
 }
 
-class _MessageBubbleState extends State<MessageBubble> {
+class _MessageBubbleState extends State<MessageBubble>
+    with AutomaticKeepAliveClientMixin {
   final _themeService = ThemeService();
   bool _isLiked = false;
   bool _isDisliked = false;
   bool _sourcesExpanded = false;
+  bool _isReasoningExpanded =
+      true; // Varsayılan olarak açık başlar (streaming sırasında)
   Uint8List? _inlineImageBytes;
   String? _inlineImageUrl;
   DateTime? _lastGameBoostTapTime;
@@ -96,6 +172,9 @@ class _MessageBubbleState extends State<MessageBubble> {
   @override
   void initState() {
     super.initState();
+    // Initialize notifications and request permissions
+    NotificationService().requestPermissions();
+
     _prepareInlineImage();
   }
 
@@ -104,6 +183,17 @@ class _MessageBubbleState extends State<MessageBubble> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.message.imageUrl != widget.message.imageUrl) {
       _prepareInlineImage();
+    }
+
+    // Streaming bittiğinde (isTyping true -> false) ve reasoning varsa, otomatik kapat
+    if (oldWidget.isTyping && !widget.isTyping) {
+      final reasoning =
+          widget.reasoning ?? widget.message.metadata?['reasoning'];
+      if (reasoning != null && reasoning.toString().isNotEmpty) {
+        setState(() {
+          _isReasoningExpanded = false;
+        });
+      }
     }
   }
 
@@ -134,7 +224,7 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
   }
 
-  MarkdownStyleSheet _buildMarkdownStyleSheet(Color textColor) {
+  MarkdownStyleSheet _buildMarkdownStyleSheet(BuildContext context) {
     final fontSizes = [13.0, 15.0, 17.0, 19.0, 21.0];
     int index = widget.fontSizeIndex;
     if (index < 0) {
@@ -143,29 +233,67 @@ class _MessageBubbleState extends State<MessageBubble> {
       index = fontSizes.length - 1;
     }
     final baseSize = fontSizes[index];
-    final family = widget.fontFamily;
+
+    // Choose font family based on sender
+    final String? effectiveFontFamily = widget.fontFamily;
+
+    // Mesaj balonu rengine göre akıllı metin rengi (kullanıcı için balon, AI için yüzey)
+    final bubbleColor = widget.message.isUser
+        ? _getUserBubbleColor(context)
+        : Theme.of(context).colorScheme.surface;
+
+    Color textColor;
+    if (widget.message.isUser) {
+      textColor = bubbleColor.computeLuminance() > 0.5
+          ? Colors.black87
+          : Colors.white;
+    } else {
+      textColor = Theme.of(context).brightness == Brightness.dark
+          ? Colors.white
+          : Colors.black87;
+    }
 
     TextStyle applyFont(TextStyle base, String? family) {
       if (family == null || family.isEmpty) {
         return base;
       }
       switch (family) {
+        case 'Inter':
+          return GoogleFonts.inter(textStyle: base);
         case 'Roboto':
           return GoogleFonts.roboto(textStyle: base);
-        case 'Montserrat':
-          return GoogleFonts.montserrat(textStyle: base);
         case 'Open Sans':
           return GoogleFonts.openSans(textStyle: base);
-        case 'Lato':
-          return GoogleFonts.lato(textStyle: base);
-        case 'PT Sans':
-          return GoogleFonts.ptSans(textStyle: base);
-        case 'Nunito':
-          return GoogleFonts.nunito(textStyle: base);
+        case 'Montserrat':
+          return GoogleFonts.montserrat(textStyle: base);
         case 'Poppins':
           return GoogleFonts.poppins(textStyle: base);
-        case 'Merriweather':
-          return GoogleFonts.merriweather(textStyle: base);
+        case 'Barlow':
+          return GoogleFonts.barlow(textStyle: base);
+        case 'Nunito':
+          return GoogleFonts.nunito(textStyle: base);
+        case 'Rubik':
+          return GoogleFonts.rubik(textStyle: base);
+        case 'Manrope':
+          return GoogleFonts.manrope(textStyle: base);
+        case 'Source Sans 3':
+        case 'Source Sans Pro':
+          return GoogleFonts.sourceSans3(textStyle: base);
+        case 'IBM Plex Sans':
+          return GoogleFonts.ibmPlexSans(textStyle: base);
+        case 'Garet':
+          // Garet is not in GoogleFonts, use system fallback or custom if added to pubspec
+          return base.copyWith(fontFamily: 'Garet');
+        case 'Quicksand':
+          return GoogleFonts.quicksand(textStyle: base);
+        case 'Mulish':
+          return GoogleFonts.mulish(textStyle: base);
+        case 'Ubuntu':
+          return GoogleFonts.ubuntu(textStyle: base);
+        case 'Fira Sans':
+          return GoogleFonts.firaSans(textStyle: base);
+        case 'Exo 2':
+          return GoogleFonts.exo2(textStyle: base);
         default:
           return base.copyWith(fontFamily: family);
       }
@@ -182,27 +310,53 @@ class _MessageBubbleState extends State<MessageBubble> {
         fontWeight: fontWeight,
         fontStyle: fontStyle,
       );
-      return applyFont(base, family);
+      return applyFont(base, effectiveFontFamily);
     }
 
+    final isDarkMode = Theme.of(context).brightness == Brightness.dark;
+
     return MarkdownStyleSheet(
-      p: baseStyle(baseSize),
-      strong: baseStyle(baseSize, fontWeight: FontWeight.bold),
+      p: baseStyle(baseSize).copyWith(height: 1.5),
+      strong: baseStyle(baseSize, fontWeight: FontWeight.w700),
       em: baseStyle(baseSize, fontStyle: FontStyle.italic),
       listBullet: baseStyle(baseSize),
-      h1: baseStyle(baseSize + 11, fontWeight: FontWeight.bold),
-      h2: baseStyle(baseSize + 9, fontWeight: FontWeight.bold),
-      h3: baseStyle(baseSize + 7, fontWeight: FontWeight.bold),
+      h1: baseStyle(
+        baseSize + 10,
+        fontWeight: FontWeight.bold,
+      ).copyWith(height: 2.0),
+      h2: baseStyle(
+        baseSize + 8,
+        fontWeight: FontWeight.bold,
+      ).copyWith(height: 1.8),
+      h3: baseStyle(
+        baseSize + 6,
+        fontWeight: FontWeight.bold,
+      ).copyWith(height: 1.6),
       blockquote: baseStyle(baseSize).copyWith(
-        color: textColor.withOpacity(0.8),
+        color: textColor.withOpacity(0.7),
         fontStyle: FontStyle.italic,
+        decorationColor: textColor.withOpacity(0.2),
       ),
-      code: const TextStyle(
-        color: Colors.white,
-        backgroundColor: Color(0xFF2A2A2A),
+      blockquoteDecoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(color: textColor.withOpacity(0.2), width: 4),
+        ),
+      ),
+      code: TextStyle(
+        color: isDarkMode ? const Color(0xFFE4E4E4) : const Color(0xFF24292E),
+        backgroundColor: isDarkMode
+            ? const Color(0xFF2A2A2A)
+            : const Color(0xFFF6F8FA),
         fontFamily: 'monospace',
+        fontSize: baseSize * 0.9,
       ),
-      tableColumnWidth: const FlexColumnWidth(),
+      tableBorder: TableBorder.all(
+        color: textColor.withOpacity(0.1),
+        width: 1,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      tableCellsPadding: const EdgeInsets.all(8),
+      tableColumnWidth: const IntrinsicColumnWidth(),
     );
   }
 
@@ -218,9 +372,13 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
     final bool hasCodeBlock = widget.message.content.contains('```');
     final bool isChartCandidate = widget.message.isChartCandidate;
+    final bool isDark = _themeService.isDarkMode;
+    final Color itemColor = isDark ? Colors.white : Colors.black87;
+    final Color iconColor = isDark ? Colors.white70 : Colors.black54;
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -238,20 +396,16 @@ class _MessageBubbleState extends State<MessageBubble> {
                     height: 4,
                     margin: const EdgeInsets.only(bottom: 12),
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: isDark ? Colors.white24 : Colors.black12,
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
                 ),
                 ListTile(
-                  leading: const Icon(
-                    Icons.summarize,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  title: const Text(
+                  leading: Icon(Icons.summarize, color: iconColor, size: 20),
+                  title: Text(
                     'Kısaca özetle',
-                    style: TextStyle(color: Colors.white, fontSize: 14),
+                    style: TextStyle(color: itemColor, fontSize: 14),
                   ),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -260,14 +414,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                 ),
                 if (hasCodeBlock)
                   ListTile(
-                    leading: const Icon(
-                      Icons.code,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                    title: const Text(
+                    leading: Icon(Icons.code, color: iconColor, size: 20),
+                    title: Text(
                       'Kod panelinde aç',
-                      style: TextStyle(color: Colors.white, fontSize: 14),
+                      style: TextStyle(color: itemColor, fontSize: 14),
                     ),
                     onTap: () {
                       Navigator.of(ctx).pop();
@@ -276,14 +426,10 @@ class _MessageBubbleState extends State<MessageBubble> {
                   ),
                 if (isChartCandidate)
                   ListTile(
-                    leading: const Icon(
-                      Icons.bar_chart,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                    title: const Text(
+                    leading: Icon(Icons.bar_chart, color: iconColor, size: 20),
+                    title: Text(
                       'Grafiğini Çıkar',
-                      style: TextStyle(color: Colors.white, fontSize: 14),
+                      style: TextStyle(color: itemColor, fontSize: 14),
                     ),
                     onTap: () {
                       Navigator.of(ctx).pop();
@@ -294,14 +440,14 @@ class _MessageBubbleState extends State<MessageBubble> {
                     },
                   ),
                 ListTile(
-                  leading: const Icon(
+                  leading: Icon(
                     Icons.format_list_bulleted,
-                    color: Colors.white,
+                    color: iconColor,
                     size: 20,
                   ),
-                  title: const Text(
+                  title: Text(
                     'Madde madde çıkar',
-                    style: TextStyle(color: Colors.white, fontSize: 14),
+                    style: TextStyle(color: itemColor, fontSize: 14),
                   ),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -309,14 +455,14 @@ class _MessageBubbleState extends State<MessageBubble> {
                   },
                 ),
                 ListTile(
-                  leading: const Icon(
+                  leading: Icon(
                     Icons.arrow_downward,
-                    color: Colors.white,
+                    color: iconColor,
                     size: 20,
                   ),
-                  title: const Text(
+                  title: Text(
                     'Devam et',
-                    style: TextStyle(color: Colors.white, fontSize: 14),
+                    style: TextStyle(color: itemColor, fontSize: 14),
                   ),
                   onTap: () {
                     Navigator.of(ctx).pop();
@@ -331,8 +477,72 @@ class _MessageBubbleState extends State<MessageBubble> {
     );
   }
 
+  /// Markdown formatlarını temizleyerek sade metin döndürür
+  String _stripMarkdown(String text) {
+    String result = text;
+
+    // Kod bloklarını temizle (```lang ... ```)
+    result = result.replaceAllMapped(
+      RegExp(r'```[\w]*\n?([\s\S]*?)```', multiLine: true),
+      (match) => match.group(1)?.trim() ?? '',
+    );
+
+    // Inline kod (`...`)
+    result = result.replaceAllMapped(
+      RegExp(r'`([^`]+)`'),
+      (match) => match.group(1) ?? '',
+    );
+
+    // Bold (**text** veya __text__)
+    result = result.replaceAllMapped(
+      RegExp(r'\*\*([^*]+)\*\*'),
+      (match) => match.group(1) ?? '',
+    );
+    result = result.replaceAllMapped(
+      RegExp(r'__([^_]+)__'),
+      (match) => match.group(1) ?? '',
+    );
+
+    // Italic (*text* veya _text_)
+    result = result.replaceAllMapped(
+      RegExp(r'\*([^*]+)\*'),
+      (match) => match.group(1) ?? '',
+    );
+    result = result.replaceAllMapped(
+      RegExp(r'_([^_]+)_'),
+      (match) => match.group(1) ?? '',
+    );
+
+    // Başlıklar (# ## ### vb.)
+    result = result.replaceAllMapped(
+      RegExp(r'^#{1,6}\s*(.+)$', multiLine: true),
+      (match) => match.group(1) ?? '',
+    );
+
+    // Bullet points (- veya *)
+    result = result.replaceAllMapped(
+      RegExp(r'^[\*\-]\s+', multiLine: true),
+      (match) => '• ',
+    );
+
+    // Numbered lists
+    result = result.replaceAllMapped(
+      RegExp(r'^\d+\.\s+', multiLine: true),
+      (match) => '',
+    );
+
+    // Links [text](url)
+    result = result.replaceAllMapped(
+      RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+      (match) => match.group(1) ?? '',
+    );
+
+    return result.trim();
+  }
+
   void _handleCopy() {
-    Clipboard.setData(ClipboardData(text: widget.message.content));
+    final cleanText = _stripMarkdown(widget.message.content);
+    Clipboard.setData(ClipboardData(text: cleanText));
     _showCopyNotification();
     if (widget.onCopy != null) {
       widget.onCopy!();
@@ -351,7 +561,9 @@ class _MessageBubbleState extends State<MessageBubble> {
           pageBuilder: (context, animation, secondaryAnimation) =>
               FullscreenImageViewer(
                 imageData: targetImageUrl,
-                heroTag: imageUrl != null ? 'image_${widget.message.id}_${imageUrl.hashCode}' : 'image_${widget.message.id}',
+                heroTag: imageUrl != null
+                    ? 'image_${widget.message.id}_${imageUrl.hashCode}'
+                    : 'image_${widget.message.id}',
               ),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
             return FadeTransition(opacity: animation, child: child);
@@ -364,22 +576,39 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   List<Widget> _parseMessageContent(String content) {
     final widgets = <Widget>[];
+    // Regex explanation:
+    // 1. Standard markdown code blocks: ```lang:filename\ncode```
+    // 2. Custom ARTIFACT tags: [ARTIFACT title="Title" lang="lang"]\ncode\n[/ARTIFACT]
     final codeBlockRegex = RegExp(
-      r'```(\w+)?(?::([\w\.\-]+))?\n([\s\S]*?)```',
+      r'(?:```(\w+)?(?::([\w\.\-]+))?\n([\s\S]*?)```)|(?:\[ARTIFACT(?:\s+title="([^"]*)")?(?:\s+lang="([^"]*)")?\]\s*([\s\S]*?)\[/ARTIFACT\])',
       multiLine: true,
+      caseSensitive: false,
+      dotAll: true,
     );
     // Telefon numaralarını yakalamak için gelişmiş regex
     // Desteklenen formatlar: 444 850 1234, +90 500 123 45 67, 0555 123 45 67, 0212 555 44 33, 4448501234
-    final phoneRegex = RegExp(r'(\+?\d{1,4}[\s\-]?)?(444[\s\-]?\d{3}[\s\-]?\d{4}|\d{3}[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}|\d{4}[\s\-]?\d{4}|\d{10,15})');
+    final phoneRegex = RegExp(
+      r'(\+?\d{1,4}[\s\-]?)?(444[\s\-]?\d{3}[\s\-]?\d{4}|\d{3}[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}|\d{4}[\s\-]?\d{4}|\d{10,15})',
+    );
     // Mesaj balonu rengine göre akıllı metin rengi (kullanıcı için balon, AI için yüzey)
     final colorScheme = Theme.of(context).colorScheme;
     final bubbleColor = widget.message.isUser
         ? _getUserBubbleColor(context)
         : colorScheme.surface;
-    final textColor = bubbleColor.computeLuminance() > 0.5
-        ? Colors.black87
-        : Colors.white;
-    final styleSheet = _buildMarkdownStyleSheet(textColor);
+    // Fix for Light Mode: AI text should be dark on light background
+    Color textColor;
+    if (widget.message.isUser) {
+      // User bubble (Colored/Grey) -> Contrast check
+      textColor = bubbleColor.computeLuminance() > 0.5
+          ? Colors.black87
+          : Colors.white;
+    } else {
+      // AI bubble (Transparent) -> Use Theme brightness
+      textColor = Theme.of(context).brightness == Brightness.dark
+          ? Colors.white
+          : Colors.black87;
+    }
+    final styleSheet = _buildMarkdownStyleSheet(context);
 
     // Telefon numaralarını tespit et ve işaretle
     String processedContent = content.replaceAllMapped(
@@ -390,7 +619,8 @@ class _MessageBubbleState extends State<MessageBubble> {
     final phoneNumbers = <String>[];
 
     for (final match in phoneMatches.reversed) {
-      final rawPhone = match.group(1)!;
+      final rawPhone = match.group(1);
+      if (rawPhone == null) continue; // Skip if group is null
       // Sadece rakamları alarak normalize et
       final phone = rawPhone.replaceAll(RegExp(r'\D'), '');
 
@@ -403,7 +633,9 @@ class _MessageBubbleState extends State<MessageBubble> {
         }
       }
 
-      if (!inCodeBlock && (phone.length >= 10 && phone.length <= 15 || phone.startsWith('444') && phone.length >= 7)) {
+      if (!inCodeBlock &&
+          (phone.length >= 10 && phone.length <= 15 ||
+              phone.startsWith('444') && phone.length >= 7)) {
         phoneNumbers.add(phone);
         // Telefon numarasını özel işaretle
         processedContent =
@@ -438,10 +670,25 @@ class _MessageBubbleState extends State<MessageBubble> {
         }
       }
 
-      // Add code block, but sadece gerçek kod dilleri için; 'text' veya boş dilde normal metin göster
-      final rawLanguage = (match.group(1) ?? '').trim().toLowerCase();
-      final filename = match.group(2)?.trim();
-      final code = match.group(3) ?? '';
+      // Add code block
+      String rawLanguage;
+      String? filename;
+      String code;
+      bool isArtifact = false;
+
+      if (match.group(6) != null) {
+        // Artifact match
+        isArtifact = true;
+        filename = match.group(4)?.trim(); // Title as filename
+        rawLanguage = (match.group(5) ?? '').trim().toLowerCase();
+        code = match.group(6) ?? '';
+      } else {
+        // Standard code block match
+        rawLanguage = (match.group(1) ?? '').trim().toLowerCase();
+        filename = match.group(2)?.trim();
+        code = match.group(3) ?? '';
+      }
+
       const codeLanguages = {
         'dart',
         'javascript',
@@ -474,7 +721,8 @@ class _MessageBubbleState extends State<MessageBubble> {
         'ruby',
       };
       final isCodeLanguage =
-          rawLanguage.isNotEmpty && codeLanguages.contains(rawLanguage);
+          isArtifact ||
+          (rawLanguage.isNotEmpty && codeLanguages.contains(rawLanguage));
 
       if (isCodeLanguage) {
         int? cbIndex;
@@ -497,6 +745,14 @@ class _MessageBubbleState extends State<MessageBubble> {
                 cbIndex == null || widget.onCodeReferenceGenerated == null
                 ? null
                 : (ref) => widget.onCodeReferenceGenerated?.call(ref),
+            onOpenArtifact: widget.onOpenArtifact == null
+                ? null
+                : (isPreview) => widget.onOpenArtifact?.call(
+                    code.trim(),
+                    rawLanguage,
+                    filename ?? 'Artifact',
+                    isPreview,
+                  ),
           ),
         );
       } else {
@@ -575,6 +831,21 @@ class _MessageBubbleState extends State<MessageBubble> {
             scrollDirection: Axis.horizontal,
             child: MarkdownBody(
               data: tableText,
+              builders: {
+                'a': CitationLinkBuilder(
+                  context,
+                  isUser: widget.message.isUser,
+                ),
+                'retry': RetryLinkBuilder(context),
+                'latex': LatexBuilder(context),
+              },
+              extensionSet: md.ExtensionSet(
+                md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+                [
+                  ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
+                  LatexSyntax(),
+                ],
+              ),
               styleSheet: styleSheet.copyWith(
                 tableColumnWidth: const IntrinsicColumnWidth(),
               ),
@@ -645,7 +916,45 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
     allMatches.sort((a, b) => a['start'].compareTo(b['start']));
 
-    for (final item in allMatches) {
+    // Citation regex: [1], [2], etc.
+    final citationRegex = RegExp(r'\[(\d+)\]');
+    // Pre-process text to extract citations and treat them as matches,
+    // BUT we need to be careful not to break markdown links [text](url).
+    // Simple approach: Iterate again to find standalone [N].
+
+    // We can't easily merge regexes. Let's do a second pass integration or improve the parser.
+    // Instead of complex parsing, let's just handle it in the existing loop if we add it.
+
+    // Better strategy: Add citation matches to allMatches list.
+    for (final m in citationRegex.allMatches(text)) {
+      // Basic check: ensure it's not part of a markdown link like [1](http...)
+      // Check if next char is '('
+      if (m.end < text.length && text[m.end] == '(') {
+        continue;
+      }
+
+      allMatches.add({
+        'start': m.start,
+        'end': m.end,
+        'type': 'citation',
+        'match': m,
+      });
+    }
+
+    // Re-sort with new matches
+    allMatches.sort((a, b) => a['start'].compareTo(b['start']));
+
+    // Filter overlapping matches (simple strategy: keep first one)
+    final filteredMatches = <Map<String, dynamic>>[];
+    int currentEnd = 0;
+    for (final m in allMatches) {
+      if (m['start'] >= currentEnd) {
+        filteredMatches.add(m);
+        currentEnd = m['end'];
+      }
+    }
+
+    for (final item in filteredMatches) {
       final start = item['start'] as int;
       final end = item['end'] as int;
       final type = item['type'] as String;
@@ -659,6 +968,21 @@ class _MessageBubbleState extends State<MessageBubble> {
             MarkdownBody(
               data: textBefore,
               styleSheet: styleSheet,
+              builders: {
+                'a': CitationLinkBuilder(
+                  context,
+                  isUser: widget.message.isUser,
+                ),
+                'retry': RetryLinkBuilder(context),
+                'latex': LatexBuilder(context),
+              },
+              extensionSet: md.ExtensionSet(
+                md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+                [
+                  ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
+                  LatexSyntax(),
+                ],
+              ),
               softLineBreak: true,
               onTapLink: (t, href, title) => _onLinkTap(href ?? t),
             ),
@@ -677,135 +1001,208 @@ class _MessageBubbleState extends State<MessageBubble> {
               builder: (ctx) => PhoneNumberPanel(phoneNumber: phoneNumber),
             ),
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              margin: const EdgeInsets.symmetric(vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               decoration: BoxDecoration(
-                color: Colors.blue.withOpacity(0.2),
+                color: Colors.blue.withOpacity(0.1),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: Colors.blue.withOpacity(0.5)),
               ),
-              child: Text(
-                phoneNumber,
-                style: TextStyle(
-                  color: Colors.blue.shade300,
-                  decoration: TextDecoration.underline,
-                  fontSize: 15,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.phone, size: 14, color: Colors.blue),
+                  const SizedBox(width: 4),
+                  Text(
+                    phoneNumber,
+                    style: const TextStyle(
+                      color: Colors.blue,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
         );
-      } else if (type == 'pdf') {
-        final pdfName = match.group(1)!;
+      } else if (type == 'citation') {
+        final citationNumber = match.group(1)!;
+        final sources = widget.message.metadata?['sources'] as List?;
+        String? sourceUrl;
+        if (sources != null && sources.isNotEmpty) {
+          try {
+            final index = int.parse(citationNumber) - 1;
+            if (index >= 0 && index < sources.length) {
+              final source = sources[index];
+              if (source is Map)
+                sourceUrl = source['url'];
+              else if (source is String)
+                sourceUrl = source;
+            }
+          } catch (_) {}
+        }
+
         parts.add(
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 10),
-            width: double.infinity,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  Colors.white.withOpacity(0.12),
-                  Colors.white.withOpacity(0.04),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white.withOpacity(0.1)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () {
-                  GreyNotification.show(context, 'PDF dosyası açılıyor...');
-                },
-                borderRadius: BorderRadius.circular(16),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: Colors.redAccent.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: FaIcon(
-                          FontAwesomeIcons.filePdf,
-                          color: Colors.redAccent,
-                          size: 26,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              pdfName,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 0.2,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              children: [
-                                Text(
-                                  'PDF Belgesi',
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.5),
-                                    fontSize: 11,
-                                  ),
-                                ),
-                                Container(
-                                  width: 3,
-                                  height: 3,
-                                  margin: const EdgeInsets.symmetric(
-                                    horizontal: 6,
-                                  ),
-                                  decoration: const BoxDecoration(
-                                    color: Colors.white24,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const Text(
-                                  'İncelemek için tıklayın',
-                                  style: TextStyle(
-                                    color: Colors.blueAccent,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(
-                        Icons.chevron_right,
-                        color: Colors.white.withOpacity(0.2),
-                        size: 20,
-                      ),
-                    ],
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            child: Transform.translate(
+              offset: const Offset(0, -4), // Superscript effect
+              child: GestureDetector(
+                onTap: sourceUrl != null ? () => _onLinkTap(sourceUrl!) : null,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: (styleSheet.p?.color ?? Colors.grey).withOpacity(
+                      0.1,
+                    ),
+                    shape: BoxShape.circle,
+                  ),
+                  child: FaIcon(
+                    FontAwesomeIcons.link,
+                    size: 9, // "baya küçük"
+                    color: (styleSheet.p?.color ?? Colors.grey).withOpacity(
+                      0.5,
+                    ), // "opaklığı düşük"
                   ),
                 ),
               ),
             ),
           ),
         );
+        lastIndex = end;
+      } else if (type == 'pdf') {
+        final rawPdfNames = match.group(1)!;
+        final pdfNames = rawPdfNames.split(', ').map((s) => s.trim()).toList();
+        final isDarkMode = Theme.of(context).brightness == Brightness.dark;
+
+        for (var pdfName in pdfNames) {
+          parts.add(
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 6),
+              width: double.infinity,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: isDarkMode
+                      ? [
+                          Colors.white.withOpacity(0.12),
+                          Colors.white.withOpacity(0.04),
+                        ]
+                      : [
+                          _getUserBubbleColor(context).withOpacity(0.2),
+                          _getUserBubbleColor(context).withOpacity(0.1),
+                        ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isDarkMode
+                      ? Colors.white.withOpacity(0.1)
+                      : Colors.black.withOpacity(0.05),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () {
+                    GreyNotification.show(context, 'PDF dosyası açılıyor...');
+                  },
+                  borderRadius: BorderRadius.circular(16),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const FaIcon(
+                            FontAwesomeIcons.filePdf,
+                            color: Colors.redAccent,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                pdfName,
+                                style: TextStyle(
+                                  color: isDarkMode
+                                      ? Colors.white
+                                      : Colors.black87,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 0.1,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  Text(
+                                    'PDF Belgesi',
+                                    style: TextStyle(
+                                      color: isDarkMode
+                                          ? Colors.white.withOpacity(0.5)
+                                          : Colors.black54,
+                                      fontSize: 10,
+                                    ),
+                                  ),
+                                  Container(
+                                    width: 3,
+                                    height: 3,
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black12,
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                  Text(
+                                    'Görüntüle',
+                                    style: TextStyle(
+                                      color: isDarkMode
+                                          ? Colors.blueAccent.shade100
+                                          : Colors.blueAccent,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(
+                          Icons.chevron_right,
+                          color: isDarkMode
+                              ? Colors.white.withOpacity(0.2)
+                              : Colors.black26,
+                          size: 18,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
       }
 
       lastIndex = end;
@@ -823,6 +1220,15 @@ class _MessageBubbleState extends State<MessageBubble> {
           MarkdownBody(
             data: remaining,
             styleSheet: styleSheet,
+            builders: {
+              'a': CitationLinkBuilder(context, isUser: widget.message.isUser),
+              'retry': RetryLinkBuilder(context),
+              'latex': LatexBuilder(context),
+            },
+            extensionSet: md.ExtensionSet(
+              md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+              [...md.ExtensionSet.gitHubFlavored.inlineSyntaxes, LatexSyntax()],
+            ),
             softLineBreak: true,
             onTapLink: (t, href, title) => _onLinkTap(href ?? t),
           ),
@@ -831,13 +1237,28 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
 
     if (parts.isEmpty) {
-      return MarkdownBody(data: text, styleSheet: styleSheet);
+      return MarkdownBody(
+        data: text,
+        styleSheet: styleSheet,
+        builders: {
+          'a': CitationLinkBuilder(context, isUser: widget.message.isUser),
+          'retry': RetryLinkBuilder(context),
+          'latex': LatexBuilder(context),
+        },
+        extensionSet: md.ExtensionSet(
+          md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+          [...md.ExtensionSet.gitHubFlavored.inlineSyntaxes, LatexSyntax()],
+        ),
+        softLineBreak: true,
+        onTapLink: (t, href, title) => _onLinkTap(href ?? t),
+      );
     }
 
-    return Column(
-      crossAxisAlignment: widget.message.isUser
-          ? CrossAxisAlignment.end
-          : CrossAxisAlignment.start,
+    return Wrap(
+      alignment: widget.message.isUser
+          ? WrapAlignment.end
+          : WrapAlignment.start,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: parts,
     );
   }
@@ -866,14 +1287,25 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   Widget _buildImageSection() {
-    final imageUrls = widget.message.imageUrls ?? [];
+    // Use message.imageUrls directly (populated from ChatScreen)
+    // Also check metadata as fallback for older messages
+    final directImageUrls = widget.message.imageUrls;
+    final metadataImageUrls =
+        widget.message.metadata?['imageUrls'] as List<dynamic>?;
     final singleImageUrl = widget.message.imageUrl;
-    
-    // Eğer tek bir imageUrl varsa, onu listeye ekle
-    final allImageUrls = singleImageUrl != null 
-        ? [singleImageUrl, ...imageUrls] 
-        : imageUrls;
-    
+
+    // Priority: direct imageUrls > metadata imageUrls > single imageUrl
+    List<String> allImageUrls;
+    if (directImageUrls != null && directImageUrls.isNotEmpty) {
+      allImageUrls = directImageUrls;
+    } else if (metadataImageUrls != null && metadataImageUrls.isNotEmpty) {
+      allImageUrls = metadataImageUrls.map((e) => e.toString()).toList();
+    } else if (singleImageUrl != null) {
+      allImageUrls = [singleImageUrl];
+    } else {
+      allImageUrls = [];
+    }
+
     if (allImageUrls.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -884,13 +1316,43 @@ class _MessageBubbleState extends State<MessageBubble> {
       return _buildSingleImage(allImageUrls.first);
     } else if (allImageUrls.length == 2) {
       // 2 görsel: yan yana
-      return _buildTwoImages(allImageUrls);
+      return _buildTwoImages(allImageUrls.cast<String>());
     } else if (allImageUrls.length >= 3) {
       // 3+ görsel: üstte 1, altta 2
-      return _buildThreeImages(allImageUrls.take(3).toList());
+      return _buildThreeImages(allImageUrls.take(3).cast<String>().toList());
     }
-    
+
     return const SizedBox.shrink();
+  }
+
+  Widget _buildToolSection() {
+    final toolData =
+        widget.message.metadata?['toolCall'] as Map<String, dynamic>?;
+    if (toolData == null) return const SizedBox.shrink();
+
+    final status = toolData['status'] ?? 'loading';
+    final title = toolData['title'] ?? 'İşlem yürütülüyor';
+    final subtitle = toolData['subtitle'];
+    final added = toolData['added'] ?? 0;
+    final removed = toolData['removed'] ?? 0;
+    final showApprove = toolData['showApprove'] ?? false;
+
+    return ToolResultBox(
+      title: title,
+      subtitle: subtitle,
+      addedLines: added,
+      removedLines: removed,
+      isLoading: status == 'loading',
+      onApprove: (showApprove && widget.onToolApproval != null)
+          ? () => widget.onToolApproval!(widget.message, toolData)
+          : null,
+      onShare: () {
+        Share.share('${widget.message.content}\n\n$title');
+      },
+      onTap: () {
+        // AI'nın taslağına gitme/bakma işlemi
+      },
+    );
   }
 
   Widget _buildSingleImage(String imageUrl) {
@@ -931,13 +1393,9 @@ class _MessageBubbleState extends State<MessageBubble> {
       height: 240,
       child: Row(
         children: [
-          Expanded(
-            child: _buildImageContainer(imageUrls[0], 0),
-          ),
+          Expanded(child: _buildImageContainer(imageUrls[0], 0)),
           const SizedBox(width: 4),
-          Expanded(
-            child: _buildImageContainer(imageUrls[1], 1),
-          ),
+          Expanded(child: _buildImageContainer(imageUrls[1], 1)),
         ],
       ),
     );
@@ -959,13 +1417,9 @@ class _MessageBubbleState extends State<MessageBubble> {
           height: 118,
           child: Row(
             children: [
-              Expanded(
-                child: _buildImageContainer(imageUrls[1], 1),
-              ),
+              Expanded(child: _buildImageContainer(imageUrls[1], 1)),
               const SizedBox(width: 4),
-              Expanded(
-                child: _buildImageContainer(imageUrls[2], 2),
-              ),
+              Expanded(child: _buildImageContainer(imageUrls[2], 2)),
             ],
           ),
         ),
@@ -1014,9 +1468,12 @@ class _MessageBubbleState extends State<MessageBubble> {
     return null;
   }
 
-  
+  @override
+  bool get wantKeepAlive => true;
+
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     // Performans için gereksiz kontroller kaldırıldı
 
     return Padding(
@@ -1077,6 +1534,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                             ),
                           ),
                         Container(
+                          constraints: BoxConstraints(
+                            maxWidth: MediaQuery.of(context).size.width * 0.8,
+                          ),
                           padding: EdgeInsets.symmetric(
                             horizontal: widget.message.isUser ? 16 : 0,
                             vertical: widget.message.isUser ? 12 : 0,
@@ -1125,173 +1585,398 @@ class _MessageBubbleState extends State<MessageBubble> {
                                   ),
                                   child: _buildTypingIndicator(),
                                 )
+                              else if ((widget.isTyping &&
+                                      widget.message.content ==
+                                          'Görsel oluşturuluyor...') ||
+                                  (widget
+                                              .message
+                                              .metadata?['isGeneratingImage'] ==
+                                          true &&
+                                      widget.message.imageUrl == null))
+                                _buildImageSkeleton()
                               else if (!widget.isTyping &&
                                   widget.message.content.isEmpty &&
                                   widget.message.imageUrl != null &&
                                   !widget.message.isUser)
                                 const SizedBox(height: 4)
-                              else
-                                ..._buildSelectableMessageContent(),
+                              else ...[
+                                // Reasoning (Inline Log Style)
+                                if (!widget.message.isUser)
+                                  Builder(
+                                    builder: (context) {
+                                      final reasoning =
+                                          widget.reasoning ??
+                                          widget.message.metadata?['reasoning'];
+                                      if (reasoning is String &&
+                                          (reasoning.isNotEmpty ||
+                                              widget.isTyping)) {
+                                        final isDark =
+                                            Theme.of(context).brightness ==
+                                            Brightness.dark;
+                                        final lines = reasoning.split('\n');
 
-                              if (widget.message.alternatives != null &&
-                                  widget.message.alternatives!.length > 1)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 8.0),
-                                  child: MultiAnswerSwitcher(
-                                    alternatives: widget.message.alternatives!,
-                                    currentIndex:
-                                        widget.message.displayAlternativeIndex,
-                                    onAlternativeSelected: (index) {
-                                      widget.onAlternativeSelected?.call(
-                                        widget.message,
-                                        index,
-                                      );
-                                    },
-                                    onDismiss: () {
-                                      final randomIndex = Random().nextInt(
-                                        widget.message.alternatives!.length,
-                                      );
-                                      widget.onAlternativeSelected?.call(
-                                        widget.message,
-                                        randomIndex,
-                                      );
+                                        return AnimatedSize(
+                                          duration: const Duration(
+                                            milliseconds: 300,
+                                          ),
+                                          alignment: Alignment.topCenter,
+                                          curve: Curves.easeInOut,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              // Header / Status
+                                              GestureDetector(
+                                                onTap: () {
+                                                  setState(() {
+                                                    _isReasoningExpanded =
+                                                        !_isReasoningExpanded;
+                                                  });
+                                                },
+                                                behavior:
+                                                    HitTestBehavior.opaque,
+                                                child: Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        bottom: 8,
+                                                        top: 4,
+                                                      ),
+                                                  child: Container(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 10,
+                                                          vertical: 6,
+                                                        ),
+                                                    decoration: BoxDecoration(
+                                                      color: isDark
+                                                          ? Colors.white
+                                                                .withOpacity(
+                                                                  0.03,
+                                                                )
+                                                          : Colors.black
+                                                                .withOpacity(
+                                                                  0.02,
+                                                                ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            8,
+                                                          ),
+                                                      border: Border.all(
+                                                        color: isDark
+                                                            ? Colors.white
+                                                                  .withOpacity(
+                                                                    0.05,
+                                                                  )
+                                                            : Colors.black
+                                                                  .withOpacity(
+                                                                    0.05,
+                                                                  ),
+                                                      ),
+                                                    ),
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        Container(
+                                                          width: 8,
+                                                          height: 8,
+                                                          decoration: BoxDecoration(
+                                                            color:
+                                                                widget.isTyping
+                                                                ? Colors
+                                                                      .blueAccent
+                                                                : Colors.grey,
+                                                            shape:
+                                                                BoxShape.circle,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 8,
+                                                        ),
+                                                        Text(
+                                                          _isReasoningExpanded
+                                                              ? (widget.isTyping
+                                                                    ? 'Analiz ediliyor...'
+                                                                    : 'Düşünce Süreci')
+                                                              : 'Düşünceyi göster',
+                                                          style: TextStyle(
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight.w600,
+                                                            color: isDark
+                                                                ? Colors.white54
+                                                                : Colors
+                                                                      .black54,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 4,
+                                                        ),
+                                                        Icon(
+                                                          _isReasoningExpanded
+                                                              ? Icons
+                                                                    .keyboard_arrow_up
+                                                              : Icons
+                                                                    .keyboard_arrow_down,
+                                                          size: 16,
+                                                          color: isDark
+                                                              ? Colors.white38
+                                                              : Colors.black38,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+
+                                              // Expanded Content (Log View)
+                                              if (_isReasoningExpanded)
+                                                Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        bottom: 8,
+                                                      ),
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment
+                                                            .start,
+                                                    children: [
+                                                      // Start marker
+                                                      Text(
+                                                        '● Düşünme süreci...',
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color:
+                                                              Colors.grey[500],
+                                                          height: 1.2,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      // Log Lines with Vertical Bar
+                                                      Container(
+                                                        margin:
+                                                            const EdgeInsets.only(
+                                                              left: 4,
+                                                            ),
+                                                        padding:
+                                                            const EdgeInsets.only(
+                                                              left: 8,
+                                                            ),
+                                                        decoration: BoxDecoration(
+                                                          border: Border(
+                                                            left: BorderSide(
+                                                              color: isDark
+                                                                  ? Colors
+                                                                        .grey[800]!
+                                                                  : Colors
+                                                                        .grey[300]!,
+                                                              width: 1.5,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        child: Column(
+                                                          crossAxisAlignment:
+                                                              CrossAxisAlignment
+                                                                  .start,
+                                                          children: lines.map((
+                                                            line,
+                                                          ) {
+                                                            if (line
+                                                                .trim()
+                                                                .isEmpty)
+                                                              return const SizedBox.shrink();
+                                                            return Padding(
+                                                              padding:
+                                                                  const EdgeInsets.only(
+                                                                    bottom: 2,
+                                                                  ),
+                                                              child: Text(
+                                                                line,
+                                                                style: TextStyle(
+                                                                  fontFamily:
+                                                                      'monospace',
+                                                                  fontSize: 11,
+                                                                  color: isDark
+                                                                      ? Colors
+                                                                            .grey[500]
+                                                                      : Colors
+                                                                            .grey[700],
+                                                                  height: 1.3,
+                                                                ),
+                                                              ),
+                                                            );
+                                                          }).toList(),
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      // End marker (only if finished)
+                                                      if (!widget.isTyping)
+                                                        Text(
+                                                          '● Süreç bitti',
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: Colors
+                                                                .grey[500],
+                                                            height: 1.2,
+                                                          ),
+                                                        ),
+                                                    ],
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        );
+                                      }
+                                      return const SizedBox.shrink();
                                     },
                                   ),
-                                ),
+                                if (widget.message.metadata?['toolCall'] !=
+                                    null)
+                                  _buildToolSection(),
+                                ..._buildSelectableMessageContent(),
+                              ],
                             ],
                           ),
                         ),
-                        const SizedBox(height: 2),
-                        Row(
-                          mainAxisAlignment: widget.message.isUser
-                              ? MainAxisAlignment.end
-                              : MainAxisAlignment.start,
-                          children: [
-                            SelectableText(
-                              DateFormat(
-                                'HH:mm',
-                              ).format(widget.message.timestamp),
-                              style: Theme.of(context).textTheme.bodyMedium!
-                                  .copyWith(
-                                    fontSize: 11, // Saat metni kucult
-                                    color: widget.message.isUser
-                                        ? (_getUserBubbleColor(
-                                                    context,
-                                                  ).computeLuminance() >
-                                                  0.5
-                                              ? Colors.black54
-                                              : Colors.white60)
-                                        : (Theme.of(context).brightness ==
-                                                  Brightness.dark
-                                              ? Colors.white54
-                                              : Colors.black54),
-                                  ),
-                            ),
-                            // Durdurulmuş mesaj göstergesi
-                            if (widget.message.isStopped) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF2B1A1A),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(
-                                    color: Colors.redAccent.withOpacity(0.7),
-                                    width: 0.8,
-                                  ),
-                                ),
-                                child: const Text(
-                                  'Durduruldu',
-                                  style: TextStyle(
-                                    color: Colors.redAccent,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                            ],
-                            // Son AI mesajı için üç nokta menüsü ve ikonlar
-                            if (!widget.message.isUser &&
-                                widget.isLastAiMessage &&
-                                !widget.isTyping &&
-                                widget.onQuickAction != null) ...[
-                              const SizedBox(width: 6),
-                              Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  // 3 nokta
-                                  GestureDetector(
-                                    onTap: _showQuickActionsSheet,
-                                    child: Icon(
-                                      Icons.more_horiz,
-                                      color: themeService.isDarkMode ? Colors.white54 : Colors.black54,
-                                      size: 16,
+                        // Alt butonlar ve timestamp (Görsel oluşturuluyorsa gizle)
+                        if (!((widget.isTyping &&
+                                widget.message.content ==
+                                    'Görsel oluşturuluyor...') ||
+                            (widget.message.metadata?['isGeneratingImage'] ==
+                                    true &&
+                                widget.message.imageUrl == null))) ...[
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisAlignment: widget.message.isUser
+                                ? MainAxisAlignment.end
+                                : MainAxisAlignment.start,
+                            children: [
+                              SelectableText(
+                                DateFormat(
+                                  'HH:mm',
+                                ).format(widget.message.timestamp),
+                                style: Theme.of(context).textTheme.bodyMedium!
+                                    .copyWith(
+                                      fontSize: 11, // Saat metni kucult
+                                      color: widget.message.isUser
+                                          ? (_getUserBubbleColor(
+                                                      context,
+                                                    ).computeLuminance() >
+                                                    0.5
+                                                ? Colors.black54
+                                                : Colors.white60)
+                                          : (Theme.of(context).brightness ==
+                                                    Brightness.dark
+                                                ? Colors.white54
+                                                : Colors.black54),
                                     ),
+                              ),
+                              // Durdurulmuş mesaj göstergesi
+                              if (widget.message.isStopped) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
                                   ),
-                                  const SizedBox(width: 8),
-                                  // Kopyala butonu
-                                  _buildCopyButton(),
-                                  const SizedBox(width: 8),
-                                  // Beğeni/beğenme butonları
-                                  _buildLikeDislikeButtons(),
-                                ],
-                              ),
-                            ],
-                            // Akıllı hızlı aksiyon butonları (son AI mesajı için)
-                            // Web arama kaynakları
-                            if (!widget.message.isUser && _hasSearchResults()) ...[
-                              const SizedBox(height: 8),
-                              _buildSearchSources(),
-                            ],
-                          ],
-                        ),
-                        // Devam ettir butonu
-                        if (widget.message.isStopped &&
-                            !widget.message.isUser) ...[
-                          const SizedBox(height: 8),
-                          GestureDetector(
-                            onTap: widget.onContinue,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 7,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF2563EB),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: const [
-                                  Icon(
-                                    Icons.play_arrow,
-                                    color: Colors.white,
-                                    size: 14,
-                                  ),
-                                  SizedBox(width: 6),
-                                  Text(
-                                    'Devam ettir',
+                                  child: const Text(
+                                    'Durduruldu',
                                     style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
+                                      color: Color.fromARGB(255, 78, 76, 76),
+                                      fontSize: 9,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
-                                ],
+                                ),
+                              ],
+                              const SizedBox(width: 8),
+                              // Alternative answer switcher - Always visible if alternatives exist
+                              if (!widget.message.isUser &&
+                                  widget.message.alternatives != null &&
+                                  widget.message.alternatives!.length > 1) ...[
+                                _buildAlternativeSwitcher(),
+                                const SizedBox(width: 8),
+                              ],
+                              // Son AI mesajı için üç nokta menüsü ve ikonlar
+                              if (!widget.message.isUser &&
+                                  widget.isLastAiMessage &&
+                                  !widget.isTyping &&
+                                  widget.onQuickAction != null) ...[
+                                const SizedBox(width: 6),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // 3 nokta
+                                    GestureDetector(
+                                      onTap: _showQuickActionsSheet,
+                                      child: Icon(
+                                        Icons.more_horiz,
+                                        color: themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54,
+                                        size: 16,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    // Kopyala butonu
+                                    _buildCopyButton(),
+                                    const SizedBox(width: 8),
+                                    // Beğeni/beğenme butonları
+                                    _buildLikeDislikeButtons(),
+                                  ],
+                                ),
+                              ],
+
+                              // Akıllı hızlı aksiyon butonları (son AI mesajı için)
+                              // Web arama kaynakları
+                            ],
+                          ),
+                          // Devam ettir butonu
+                          if (widget.message.isStopped &&
+                              !widget.message.isUser) ...[
+                            const SizedBox(height: 8),
+                            GestureDetector(
+                              onTap: widget.onContinue,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 7,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF2563EB),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: const [
+                                    Icon(
+                                      Icons.play_arrow,
+                                      color: Colors.white,
+                                      size: 14,
+                                    ),
+                                    SizedBox(width: 6),
+                                    Text(
+                                      'Devam ettir',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                        // Akıllı hızlı aksiyon butonları (son AI mesajı için)
-                        // Web arama kaynakları
-                        if (!widget.message.isUser && _hasSearchResults()) ...[
-                          const SizedBox(height: 8),
-                          _buildSearchSources(),
-                        ],
-                      ],
+                          ],
+                          // Akıllı hızlı aksiyon butonları (son AI mesajı için)
+                          // Web arama kaynakları
+                          if (!widget.message.isUser &&
+                              _hasSearchResults()) ...[
+                            const SizedBox(height: 8),
+                            _buildSearchSources(),
+                          ],
+                        ], // Closes the 'if !generating' block
+                      ], // Closes the children list
                     ),
                   ),
                   // AI mesajı için: Kopyala butonu kaldırıldı
@@ -1323,9 +2008,13 @@ class _MessageBubbleState extends State<MessageBubble> {
   }
 
   Widget _buildLangFlag(String emoji) {
+    // Flag background should be transparent or adaptive
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return CircleAvatar(
       radius: 14,
-      backgroundColor: const Color(0xFF111827),
+      backgroundColor: isDark
+          ? const Color(0xFF111827)
+          : Colors.transparent, // Fix for light mode
       child: Text(emoji, style: const TextStyle(fontSize: 14)),
     );
   }
@@ -1401,25 +2090,8 @@ class _MessageBubbleState extends State<MessageBubble> {
           widget.message.senderUsername == null;
 
       if (isAI) {
-        // AI Avatarı: logo3.png, siyah zemin
-        return Container(
-          width: 36,
-          height: 36,
-          decoration: const BoxDecoration(
-            shape: BoxShape.circle,
-            color: Colors.black, // AI için siyah zemin
-          ),
-          padding: const EdgeInsets.all(2), // Biraz padding
-          child: ClipOval(
-            child: Image.asset(
-              themeService.getLogoPath('logo3.png'),
-              fit: BoxFit.contain, // Logo tam sığsın
-              filterQuality: FilterQuality.high,
-              errorBuilder: (context, error, stackTrace) =>
-                  const Icon(Icons.smart_toy, color: Colors.white, size: 20),
-            ),
-          ),
-        );
+        // AI Avatarı: Kullanıcı isteği üzerine kaldırıldı
+        return const SizedBox.shrink();
       }
 
       // KULLANICI AVATARI (Grup üyesi)
@@ -1456,9 +2128,55 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
   }
 
+  Widget _buildImageSkeleton() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(bottom: 8.0, left: 4),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                ),
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Görsel oluşturuluyor...',
+                style: TextStyle(
+                  color: Colors.blue,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const ShimmerSkeleton(width: 250, height: 250, radius: 12),
+      ],
+    );
+  }
+
   List<Widget> _buildSelectableMessageContent() {
-    final content = widget.message.content;
-    return _parseMessageContent(content);
+    if (widget.isTyping && widget.streamingContent != null) {
+      return [
+        ValueListenableBuilder<String>(
+          valueListenable: widget.streamingContent!,
+          builder: (context, streamingMsg, _) {
+            final contentToShow = streamingMsg.isEmpty ? ' ' : streamingMsg;
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: _parseMessageContent(contentToShow),
+            );
+          },
+        ),
+      ];
+    }
+    return _parseMessageContent(widget.message.content);
   }
 
   Widget _buildChart(LineChartData data) {
@@ -1498,17 +2216,21 @@ class _MessageBubbleState extends State<MessageBubble> {
             });
           },
           child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(
                 'Kaynaklar:',
                 style: TextStyle(
-                  color: themeService.isDarkMode ? Colors.white60 : Colors.black54,
+                  color: themeService.isDarkMode
+                      ? Colors.white60
+                      : Colors.black54,
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
                 ),
               ),
               const SizedBox(width: 8),
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: List.generate(logosToShow, (index) {
                   final raw = results[index];
                   final item = raw is Map<String, dynamic>
@@ -1521,12 +2243,14 @@ class _MessageBubbleState extends State<MessageBubble> {
                   );
                 }),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               Icon(
                 _sourcesExpanded
                     ? Icons.keyboard_arrow_up
                     : Icons.keyboard_arrow_down,
-                color: themeService.isDarkMode ? Colors.white54 : Colors.black54,
+                color: themeService.isDarkMode
+                    ? Colors.white54
+                    : Colors.black54,
                 size: 18,
               ),
             ],
@@ -1555,7 +2279,7 @@ class _MessageBubbleState extends State<MessageBubble> {
                   child: ListView.builder(
                     shrinkWrap: true,
                     physics: const BouncingScrollPhysics(),
-                    itemCount: results.length,
+                    itemCount: results.length > 3 ? 3 : results.length,
                     itemBuilder: (context, index) {
                       final raw = results[index];
                       final item = raw is Map<String, dynamic>
@@ -1576,9 +2300,15 @@ class _MessageBubbleState extends State<MessageBubble> {
                           child: Container(
                             padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
-                              color: themeService.isDarkMode ? const Color(0xFF101010) : Colors.grey.withOpacity(0.1),
+                              color: themeService.isDarkMode
+                                  ? const Color(0xFF101010)
+                                  : Colors.grey.withOpacity(0.1),
                               borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: themeService.isDarkMode ? Colors.white10 : Colors.black12),
+                              border: Border.all(
+                                color: themeService.isDarkMode
+                                    ? Colors.white10
+                                    : Colors.black12,
+                              ),
                             ),
                             child: Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1594,7 +2324,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                                         Text(
                                           title,
                                           style: TextStyle(
-                                            color: themeService.isDarkMode ? Colors.white : Colors.black87,
+                                            color: themeService.isDarkMode
+                                                ? Colors.white
+                                                : Colors.black87,
                                             fontSize: 12,
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -1607,7 +2339,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                                           child: Text(
                                             _extractDomain(link),
                                             style: TextStyle(
-                                              color: themeService.isDarkMode ? Colors.blueAccent : Colors.blue,
+                                              color: themeService.isDarkMode
+                                                  ? Colors.blueAccent
+                                                  : Colors.blue,
                                               fontSize: 11,
                                             ),
                                           ),
@@ -1620,7 +2354,9 @@ class _MessageBubbleState extends State<MessageBubble> {
                                           child: Text(
                                             snippet,
                                             style: TextStyle(
-                                              color: themeService.isDarkMode ? Colors.white60 : Colors.black54,
+                                              color: themeService.isDarkMode
+                                                  ? Colors.white60
+                                                  : Colors.black54,
                                               fontSize: 11,
                                             ),
                                           ),
@@ -1718,9 +2454,9 @@ class _MessageBubbleState extends State<MessageBubble> {
   // Mod'a göre typing göstergesi (etiket + 3 nokta veya sadece 3 nokta)
   Widget _buildTypingIndicator() {
     final label = _extractLoadingLabel(widget.loadingMessage);
-    if (label == null) {
-      // Normal/görsel analiz veya bilinmeyen durumlarda sadece 3 nokta
-      return _ThinkingDots();
+    if (label == 'thinking' || label == null) {
+      // "Düşünüyor..." yerine yanıp sönen/küçülüp büyüyen cursor
+      return const PulseCursorIndicator();
     }
     return GestureDetector(
       onTap: widget.onShowReasoning,
@@ -1730,6 +2466,7 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   String? _extractLoadingLabel(String? loadingMessage) {
     if (loadingMessage == null) return null;
+    if (loadingMessage == 'thinking') return 'thinking';
     if (loadingMessage.startsWith('Görsel oluşturuluyor')) {
       return 'Görsel oluşturuluyor';
     }
@@ -1740,9 +2477,9 @@ class _MessageBubbleState extends State<MessageBubble> {
       return 'Derin düşünüyor';
     }
     if (loadingMessage.startsWith('Düşünüyor')) {
-      return 'Düşünüyor';
+      return 'thinking';
     }
-    return null; // Diğer durumlarda sade 3 nokta
+    return null;
   }
 
   // Like/dislike butonları
@@ -1764,7 +2501,9 @@ class _MessageBubbleState extends State<MessageBubble> {
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.all(4),
             child: FaIcon(
-              _isLiked ? FontAwesomeIcons.solidThumbsUp : FontAwesomeIcons.thumbsUp,
+              _isLiked
+                  ? FontAwesomeIcons.solidThumbsUp
+                  : FontAwesomeIcons.thumbsUp,
               color: _isLiked ? Colors.blue : Colors.grey[400],
               size: 14,
             ),
@@ -1785,13 +2524,89 @@ class _MessageBubbleState extends State<MessageBubble> {
             duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.all(4),
             child: FaIcon(
-              _isDisliked ? FontAwesomeIcons.solidThumbsDown : FontAwesomeIcons.thumbsDown,
+              _isDisliked
+                  ? FontAwesomeIcons.solidThumbsDown
+                  : FontAwesomeIcons.thumbsDown,
               color: _isDisliked ? Colors.red : Colors.grey[400],
               size: 14,
             ),
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildAlternativeSwitcher() {
+    final alternatives = widget.message.alternatives ?? [];
+    final currentIndex = widget.message.displayAlternativeIndex;
+    final isDark = _themeService.isDarkMode;
+
+    return Container(
+      color: Colors.transparent,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Left arrow
+          GestureDetector(
+            behavior: HitTestBehavior.translucent, // Hitbox improvement
+            onTap: currentIndex > 0
+                ? () => widget.onAlternativeSelected?.call(
+                    widget.message,
+                    currentIndex - 1,
+                  )
+                : null,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 6,
+              ), // Hitbox padding
+              child: Icon(
+                Icons.chevron_left,
+                size: 22, // Larger icon
+                color: currentIndex > 0
+                    ? (isDark ? Colors.white70 : Colors.black54)
+                    : Colors.transparent,
+              ),
+            ),
+          ),
+          // No SizedBox needed due to padding
+          // Current index display
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              '${currentIndex + 1}',
+              style: TextStyle(
+                fontSize: 14, // Larger text
+                fontWeight: FontWeight.w600,
+                color: isDark ? Colors.white70 : Colors.black54,
+              ),
+            ),
+          ),
+          // Right arrow
+          GestureDetector(
+            behavior: HitTestBehavior.translucent, // Hitbox improvement
+            onTap: currentIndex < alternatives.length - 1
+                ? () => widget.onAlternativeSelected?.call(
+                    widget.message,
+                    currentIndex + 1,
+                  )
+                : null,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 6,
+              ), // Hitbox padding
+              child: Icon(
+                Icons.chevron_right,
+                size: 22, // Larger icon
+                color: currentIndex < alternatives.length - 1
+                    ? (isDark ? Colors.white70 : Colors.black54)
+                    : Colors.transparent,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1802,12 +2617,12 @@ class _MessageBubbleState extends State<MessageBubble> {
         setState(() {
           _isCopying = true;
         });
-        
+
         await Clipboard.setData(ClipboardData(text: widget.message.content));
-        
+
         // Toast bildirim göster
         _showCopyToast();
-        
+
         // Animasyonu geri al
         Future.delayed(const Duration(seconds: 1), () {
           if (mounted) {
@@ -1833,7 +2648,7 @@ class _MessageBubbleState extends State<MessageBubble> {
   void _showCopyToast() {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
-    
+
     entry = OverlayEntry(
       builder: (context) => Positioned(
         top: MediaQuery.of(context).padding.top + 50,
@@ -1844,7 +2659,9 @@ class _MessageBubbleState extends State<MessageBubble> {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: themeService.isDarkMode ? Colors.grey[800] : Colors.grey[700],
+              color: themeService.isDarkMode
+                  ? Colors.grey[800]
+                  : Colors.grey[700],
               borderRadius: BorderRadius.circular(8),
               boxShadow: [
                 BoxShadow(
@@ -1877,9 +2694,9 @@ class _MessageBubbleState extends State<MessageBubble> {
         ),
       ),
     );
-    
+
     overlay.insert(entry);
-    
+
     // 2 saniye sonra kaldır
     Future.delayed(const Duration(seconds: 2), () {
       entry.remove();
@@ -1892,12 +2709,12 @@ class _MessageBubbleState extends State<MessageBubble> {
   void _copyToClipboard() {
     setState(() => _isCopying = true);
     Clipboard.setData(ClipboardData(text: widget.message.content));
-    
+
     // Simulate copy animation
     Future.delayed(const Duration(milliseconds: 500), () {
       setState(() => _isCopying = false);
     });
-    
+
     GreyNotification.show(context, 'Mesaj kopyalandı');
   }
 
@@ -1905,11 +2722,21 @@ class _MessageBubbleState extends State<MessageBubble> {
   void _showMessageContextMenu() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Theme.of(context).colorScheme.surface,
+      backgroundColor: themeService.isDarkMode
+          ? const Color(0xFF1A1A1A)
+          : Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (context) {
+        final isImageOnly =
+            widget.message.imageUrl != null &&
+            widget.message.content.trim().isEmpty;
+        final isGeneratingImage =
+            widget.isTyping &&
+            widget.message.content == 'Görsel oluşturuluyor...';
+        final hideTextActions = isImageOnly || isGeneratingImage;
+
         return SafeArea(
           child: SingleChildScrollView(
             child: Padding(
@@ -1918,38 +2745,84 @@ class _MessageBubbleState extends State<MessageBubble> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   ListTile(
-                    leading: Icon(Icons.copy, color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                    leading: Icon(
+                      Icons.copy,
+                      color: themeService.isDarkMode
+                          ? Colors.white
+                          : Colors.black87,
+                    ),
                     title: Text(
                       'Kopyala',
-                      style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                      style: TextStyle(
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
                     ),
                     onTap: () {
                       Navigator.pop(context);
                       _copyToClipboard();
                     },
                   ),
-                  ListTile(
-                    leading: Icon(Icons.text_fields, color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                    title: Text(
-                      'Metin Seç',
-                      style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                  if (!widget.message.isUser && !hideTextActions)
+                    ListTile(
+                      leading: Icon(
+                        Icons.volume_up,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
+                      title: Text(
+                        'Sesli Oku',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        widget.onPlay?.call();
+                      },
                     ),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _selectText();
-                    },
-                  ),
+                  if (!hideTextActions)
+                    ListTile(
+                      leading: Icon(
+                        Icons.text_fields,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
+                      title: Text(
+                        'Metin Seç',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _selectText();
+                      },
+                    ),
                   if (widget.onPin != null)
                     ListTile(
                       leading: Icon(
                         widget.isPinned
                             ? Icons.push_pin
                             : Icons.push_pin_outlined,
-                        color: themeService.isDarkMode ? Colors.white : Colors.black87,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
                       ),
                       title: Text(
                         widget.isPinned ? 'Sabitten kaldır' : 'Mesajı sabitle',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () {
                         Navigator.pop(context);
@@ -1960,14 +2833,16 @@ class _MessageBubbleState extends State<MessageBubble> {
                       widget.onQuickAction != null &&
                       widget.message.content.trim().isNotEmpty) ...[
                     const Divider(color: Colors.white24),
-                    const Align(
+                    Align(
                       alignment: Alignment.centerLeft,
                       child: Padding(
-                        padding: EdgeInsets.symmetric(vertical: 4),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
                         child: Text(
                           'Çevir',
                           style: TextStyle(
-                            color: Colors.white70,
+                            color: themeService.isDarkMode
+                                ? Colors.white70
+                                : Colors.black54,
                             fontSize: 13,
                             fontWeight: FontWeight.w500,
                           ),
@@ -1978,7 +2853,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇹🇷'),
                       title: Text(
                         'Türkçe',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_tr'),
@@ -1987,7 +2866,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇬🇧'),
                       title: Text(
                         'İngilizce (EN)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_en'),
@@ -1996,7 +2879,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇩🇪'),
                       title: Text(
                         'Almanca (DE)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_de'),
@@ -2005,7 +2892,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇫🇷'),
                       title: Text(
                         'Fransızca (FR)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_fr'),
@@ -2014,7 +2905,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇪🇸'),
                       title: Text(
                         'İspanyolca (ES)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_es'),
@@ -2023,7 +2918,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇮🇹'),
                       title: Text(
                         'İtalyanca (IT)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_it'),
@@ -2032,7 +2931,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇷🇺'),
                       title: Text(
                         'Rusça (RU)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_ru'),
@@ -2041,7 +2944,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇸🇦'),
                       title: Text(
                         'Arapça (AR)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_ar'),
@@ -2050,7 +2957,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇯🇵'),
                       title: Text(
                         'Japonca (JA)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_ja'),
@@ -2059,7 +2970,11 @@ class _MessageBubbleState extends State<MessageBubble> {
                       leading: _buildLangFlag('🇨🇳'),
                       title: Text(
                         'Çince (ZH)',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () =>
                           _runTranslateQuickAction(context, 'translate_zh'),
@@ -2067,21 +2982,42 @@ class _MessageBubbleState extends State<MessageBubble> {
                   ],
                   if (!widget.message.isUser && widget.isLastAiMessage) ...[
                     ListTile(
-                      leading: Icon(Icons.refresh, color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                      leading: Icon(
+                        Icons.refresh,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
                       title: Text(
                         'Tekrar Dene',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () {
                         Navigator.pop(context);
                         _retryMessage();
                       },
                     ),
+                  ],
+                  // Paylaş butonu TÜM AI mesajlarında görünsün
+                  if (!widget.message.isUser) ...[
                     ListTile(
-                      leading: Icon(Icons.share, color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                      leading: Icon(
+                        Icons.share,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
                       title: Text(
                         'Paylaş',
-                        style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
                       ),
                       onTap: () {
                         Navigator.pop(context);
@@ -2100,75 +3036,99 @@ class _MessageBubbleState extends State<MessageBubble> {
 
   // Metin seçme
   void _selectText() {
+    final isDark = themeService.isDarkMode;
     showDialog(
       context: context,
-      barrierColor: Colors.black87,
+      barrierColor: isDark ? Colors.black87 : Colors.black54,
       builder: (context) {
-        final bubbleColor = widget.message.isUser
-            ? const Color(0xFF2A2A2A)
-            : Theme.of(context).primaryColor;
-        final textColor = bubbleColor.computeLuminance() > 0.5
-            ? Colors.black87
-            : Colors.white;
         return Dialog(
-          backgroundColor: const Color(0xFF1A1A1A),
+          backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
           insetPadding: const EdgeInsets.all(16),
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text(
+                    Text(
                       'Metni seç',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
+                      style: TextStyle(
+                        color: isDark ? Colors.white : Colors.black87,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                     IconButton(
-                      icon: const Icon(
+                      icon: Icon(
                         Icons.close,
-                        color: Colors.white70,
-                        size: 18,
+                        color: isDark ? Colors.white70 : Colors.black54,
+                        size: 20,
                       ),
                       onPressed: () => Navigator.pop(context),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 260,
+                const SizedBox(height: 16),
+                Container(
+                  height:
+                      MediaQuery.of(context).size.height *
+                      0.5, // Daha büyük yapıldı
+                  constraints: const BoxConstraints(minHeight: 200),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isDark ? Colors.black26 : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(16), // Daha yuvarlak
+                    border: Border.all(
+                      color: isDark ? Colors.white10 : Colors.black12,
+                    ),
+                  ),
                   child: SingleChildScrollView(
+                    physics: const BouncingScrollPhysics(),
                     child: SelectionArea(
                       child: Text(
                         widget.message.content,
                         style: TextStyle(
-                          color: textColor,
-                          fontSize: 15,
-                          height: 1.5,
+                          color: isDark ? Colors.white : Colors.black87,
+                          fontSize: 16, // Biraz daha büyük
+                          height: 1.6,
                         ),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    TextButton(
+                    TextButton.icon(
                       onPressed: () {
                         Clipboard.setData(
                           ClipboardData(text: widget.message.content),
                         );
                         GreyNotification.show(context, 'Metin kopyalandı');
+                        Navigator.pop(context);
                       },
-                      child: const Text(
+                      icon: Icon(
+                        Icons.copy,
+                        size: 16,
+                        color: isDark ? Colors.white70 : Colors.blue,
+                      ),
+                      label: Text(
                         'Kopyala',
-                        style: TextStyle(color: Colors.white),
+                        style: TextStyle(
+                          color: isDark ? Colors.white : Colors.blue,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
-                    TextButton(
+                    ElevatedButton.icon(
                       onPressed: () {
                         if (widget.message.content.trim().isEmpty) {
                           GreyNotification.show(
@@ -2178,11 +3138,17 @@ class _MessageBubbleState extends State<MessageBubble> {
                           return;
                         }
                         Share.share(widget.message.content.trim());
+                        Navigator.pop(context);
                       },
-                      child: const Text(
-                        'Paylaş',
-                        style: TextStyle(color: Colors.white),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
+                      icon: const Icon(Icons.share, size: 16),
+                      label: const Text('Paylaş'),
                     ),
                   ],
                 ),
@@ -2223,6 +3189,12 @@ class _MessageBubbleState extends State<MessageBubble> {
     }
     final normalized = url.trim();
     if (normalized.isEmpty) return;
+
+    // Retry özelliğini tetikle
+    if (normalized == 'retry://last_action') {
+      _retryMessage();
+      return;
+    }
 
     // Offline mini oyun: internet yokken can sıkılmasın diye
     if (normalized == 'offlinegame://start' || normalized == 'gamehub://') {
@@ -2343,8 +3315,10 @@ class _ModeLoadingIndicatorState extends State<_ModeLoadingIndicator>
     return AnimatedBuilder(
       animation: _animation,
       builder: (context, child) {
-        final baseColor = Colors.white38;
-        final highlightColor = Colors.white;
+        // Tema bazlı renk seçimi
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        final baseColor = isDark ? Colors.white38 : Colors.black38;
+        final highlightColor = isDark ? Colors.white : Colors.black;
         final color =
             Color.lerp(baseColor, highlightColor, _animation.value) ??
             baseColor;
@@ -2356,6 +3330,78 @@ class _ModeLoadingIndicatorState extends State<_ModeLoadingIndicator>
             const SizedBox(width: 8),
             _ThinkingDots(),
           ],
+        );
+      },
+    );
+  }
+}
+
+class PulseCursorIndicator extends StatefulWidget {
+  const PulseCursorIndicator({super.key});
+
+  @override
+  State<PulseCursorIndicator> createState() => _PulseCursorIndicatorState();
+}
+
+class _PulseCursorIndicatorState extends State<PulseCursorIndicator>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _opacityAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+
+    _scaleAnimation = Tween<double>(
+      begin: 0.8,
+      end: 1.1,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+
+    _opacityAnimation = Tween<double>(
+      begin: 0.4,
+      end: 1.0,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return Opacity(
+          opacity: _opacityAnimation.value,
+          child: Transform.scale(
+            scale: _scaleAnimation.value,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: isDark ? Colors.white70 : Colors.black54,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: (isDark ? Colors.white : Colors.black).withOpacity(
+                      0.2,
+                    ),
+                    blurRadius: 4,
+                    spreadRadius: 1,
+                  ),
+                ],
+              ),
+            ),
+          ),
         );
       },
     );
@@ -2438,7 +3484,9 @@ class _ThinkingDotsState extends State<_ThinkingDots>
                   width: 4,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: themeService.isDarkMode ? Colors.white60 : Colors.black54,
+                    color: themeService.isDarkMode
+                        ? Colors.white60
+                        : Colors.black54,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -2448,5 +3496,125 @@ class _ThinkingDotsState extends State<_ThinkingDots>
         );
       }),
     );
+  }
+}
+
+class ShimmerSkeleton extends StatefulWidget {
+  final double width;
+  final double height;
+  final double radius;
+
+  const ShimmerSkeleton({
+    Key? key,
+    required this.width,
+    required this.height,
+    this.radius = 12,
+  }) : super(key: key);
+
+  @override
+  State<ShimmerSkeleton> createState() => _ShimmerSkeletonState();
+}
+
+class _ShimmerSkeletonState extends State<ShimmerSkeleton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // Premium renk paleti
+    final baseColor = isDark
+        ? const Color(0xFF1F2937) // Koyu gri (Slate-800)
+        : const Color(0xFFE5E7EB); // Açık gri (Gray-200)
+
+    final highlightColor = isDark
+        ? const Color(0xFF374151) // Daha açık koyu gri (Slate-700)
+        : const Color(0xFFF3F4F6); // Neredeyse beyaz (Gray-100)
+
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        return Container(
+          width: widget.width,
+          height: widget.height,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(widget.radius),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [baseColor, highlightColor, baseColor],
+              stops: [
+                0.0,
+                // Animasyonlu geçiş
+                (_controller.value - 0.2).clamp(0.0, 1.0),
+                (_controller.value + 0.2).clamp(0.0, 1.0),
+              ],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(widget.radius),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.05),
+                width: 1,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class RetryLinkBuilder extends MarkdownElementBuilder {
+  final BuildContext context;
+
+  RetryLinkBuilder(this.context);
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final href = element.attributes['href'];
+    if (href != null && href.startsWith('retry://')) {
+      return Container(
+        margin: const EdgeInsets.only(top: 8),
+        child: IgnorePointer(
+          ignoring: true, // Let MarkdownBody handle the tap via onTapLink
+          child: ElevatedButton.icon(
+            onPressed: () {},
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('Tekrar Dene'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.primary,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            ),
+          ),
+        ),
+      );
+    }
+    return null;
   }
 }

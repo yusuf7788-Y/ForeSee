@@ -1,0 +1,6 @@
+name = "foresee-openrouter-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Environment variables (deploy sonrası Cloudflare Dashboard'dan eklenecek)
+# OPENROUTER_API_KEY = "your-key-here" (Dashboard'dan ekle)

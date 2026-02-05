@@ -25,7 +25,7 @@ class AuthScreenWrapper extends StatelessWidget {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          Image.asset('background1.png', fit: BoxFit.cover),
+          Image.asset('assets/background1.png', fit: BoxFit.cover),
           SafeArea(
             child: Column(
               children: [
@@ -122,7 +122,7 @@ class AuthScreenWrapper extends StatelessWidget {
           Transform.translate(
             offset: const Offset(0, 3),
             child: Image.asset(
-              themeService.getLogoPath('logo.png'),
+              themeService.getLogoPath('assets/logo.png'),
               height: 53,
               fit: BoxFit.contain,
             ),

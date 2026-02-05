@@ -27,7 +27,6 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
   // Customization
   List<Color> _padColors = [];
 
-
   @override
   void initState() {
     super.initState();
@@ -38,10 +37,14 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
 
   Future<void> _loadCustomizations() async {
     final inventory = await _storageService.loadPlayerInventory();
-    final equippedColorId = inventory.equippedItems[GameId.simonGame.toString()]?[ItemType.cardColor.toString()];
+    final equippedColorId =
+        inventory.equippedItems[GameId.simonGame.toString()]?[ItemType.cardColor
+            .toString()];
 
     if (equippedColorId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedColorId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedColorId,
+      );
       if (shopItem.value == 'pastel') {
         _padColors = _getPastelColors();
       }
@@ -71,6 +74,37 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
       _currentStep = 0;
     });
     _nextRound();
+  }
+
+  /// Çıkış onayı için dialog göster
+  Future<bool> _showExitConfirmation() async {
+    if (_score == 0) return true; // Skor yoksa direkt çık
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF020617),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Çıkmak istediğine emin misin?',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          'Şu anki skorun: $_score\nÇıkarsan bu skoru kaybedecek ve FsCoin kazanamayacaksın.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('İptal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Çık', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   Future<void> _nextRound() async {
@@ -144,7 +178,9 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
     final int coinsEarned = (_score / 5).round();
     if (coinsEarned > 0) {
       PlayerInventory inventory = await _storageService.loadPlayerInventory();
-      final updatedInventory = inventory.copyWith(fsCoinBalance: inventory.fsCoinBalance + coinsEarned);
+      final updatedInventory = inventory.copyWith(
+        fsCoinBalance: inventory.fsCoinBalance + coinsEarned,
+      );
       await _storageService.savePlayerInventory(updatedInventory);
     }
 
@@ -204,7 +240,11 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
                     child: IconButton(
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                       iconSize: 20,
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: () async {
+                        if (await _showExitConfirmation()) {
+                          Navigator.of(context).pop();
+                        }
+                      },
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -222,10 +262,7 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
                       SizedBox(height: 2),
                       Text(
                         'Simon Says tarzı, sırayı takip et',
-                        style: TextStyle(
-                          color: Colors.white38,
-                          fontSize: 12,
-                        ),
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                     ],
                   ),
@@ -241,7 +278,10 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
                   ),
                   Text(
                     'Skor: $_score',
-                    style: const TextStyle(color: Colors.greenAccent, fontSize: 13),
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontSize: 13,
+                    ),
                   ),
                 ],
               ),
@@ -264,9 +304,7 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                _isShowingSequence
-                    ? 'Diziyi izle...'
-                    : 'Sırayı tekrar et',
+                _isShowingSequence ? 'Diziyi izle...' : 'Sırayı tekrar et',
                 style: const TextStyle(color: Colors.white70, fontSize: 13),
               ),
               const SizedBox(height: 16),
@@ -339,26 +377,26 @@ class _SimonGameScreenState extends State<SimonGameScreen> {
 
 // Color Schemes
 List<Color> _getDefaultColors() => const [
-      Color(0xFF22C55E),
-      Color(0xFF3B82F6),
-      Color(0xFFFB923C),
-      Color(0xFFEC4899),
-      Color(0xFF2DD4BF),
-      Color(0xFF6366F1),
-      Color(0xFFF97316),
-      Color(0xFFE11D48),
-    ];
+  Color(0xFF22C55E),
+  Color(0xFF3B82F6),
+  Color(0xFFFB923C),
+  Color(0xFFEC4899),
+  Color(0xFF2DD4BF),
+  Color(0xFF6366F1),
+  Color(0xFFF97316),
+  Color(0xFFE11D48),
+];
 
 List<Color> _getPastelColors() => const [
-      Color(0xFFB2F2BB),
-      Color(0xFFA8D8EA),
-      Color(0xFFFCE38A),
-      Color(0xFFF38181),
-      Color(0xFF95E1D3),
-      Color(0xFFB39DDB),
-      Color(0xFFFFD180),
-      Color(0xFFF48FB1),
-    ];
+  Color(0xFFB2F2BB),
+  Color(0xFFA8D8EA),
+  Color(0xFFFCE38A),
+  Color(0xFFF38181),
+  Color(0xFF95E1D3),
+  Color(0xFFB39DDB),
+  Color(0xFFFFD180),
+  Color(0xFFF48FB1),
+];
 
 class _SimonModeChip extends StatelessWidget {
   final String label;
@@ -381,9 +419,7 @@ class _SimonModeChip extends StatelessWidget {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(999),
           color: selected ? Colors.white12 : Colors.transparent,
-          border: Border.all(
-            color: selected ? Colors.white : Colors.white24,
-          ),
+          border: Border.all(color: selected ? Colors.white : Colors.white24),
         ),
         child: Text(
           label,

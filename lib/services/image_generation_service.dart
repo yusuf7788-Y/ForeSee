@@ -14,70 +14,90 @@ class ImageGenerationService {
   /// Pollinations.ai ile görsel oluşturma (ücretsiz, API key gerektirmez)
   /// Not: Artık ana yol Grok/OpenRouter, bu metod sadece FALBACK olarak kullanılıyor.
   Future<String> generateImage(
-  String prompt, {
-  String? negativePrompt,
-  String? referenceImageUrl,
-}) async {
-  try {
-    print('🌸 Pollinations.ai ile görsel oluşturuluyor...');
+    String prompt, {
+    String? referenceImageUrl,
+    String? negativePrompt,
+  }) async {
+    final List<String> models = ['flux', 'turbo', 'unity'];
+    int maxRetries = 2;
+    Exception? lastException;
 
-    final apiKey = dotenv.env['POLLINATIONS_API_KEY'] ?? '';
-    if (apiKey.isEmpty) {
-      throw Exception('POLLINATIONS_API_KEY bulunamadı');
+    for (String currentModel in models) {
+      for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          print(
+            '🌸 Pollinations.ai ($currentModel) ile görsel oluşturuluyor... Deneme: ${attempt + 1}',
+          );
+
+          String finalPrompt = prompt.trim();
+          if (negativePrompt != null && negativePrompt.trim().isNotEmpty) {
+            finalPrompt += " [NOT: ${negativePrompt.trim()}]";
+          }
+
+          String imageUrl =
+              'https://gen.pollinations.ai/image/${Uri.encodeComponent(finalPrompt)}'
+              '?model=$currentModel'
+              '&width=1024'
+              '&height=1024'
+              '&enhance=true'
+              '&nologo=true'
+              '&quality=hd';
+
+          if (referenceImageUrl != null && referenceImageUrl.isNotEmpty) {
+            imageUrl += '&image=${Uri.encodeComponent(referenceImageUrl)}';
+          }
+
+          final response = await http
+              .get(Uri.parse(imageUrl))
+              .timeout(const Duration(seconds: 45));
+
+          if (response.statusCode == 200) {
+            final bytes = response.bodyBytes;
+            if (bytes.length < 1000) {
+              throw Exception('Oluşturulan görsel çok küçük veya geçersiz.');
+            }
+            final base64Image = base64Encode(bytes);
+
+            print('✅ Pollinations.ai ($currentModel) ile görsel oluşturuldu!');
+
+            final watermarkedImage = await _addWatermark(
+              'data:image/jpeg;base64,$base64Image',
+            );
+
+            return watermarkedImage;
+          } else {
+            throw Exception(
+              'Pollinations.ai ($currentModel) hatası: ${response.statusCode}',
+            );
+          }
+        } catch (e) {
+          lastException = e is Exception ? e : Exception(e.toString());
+          print('⚠️ Deneme ${attempt + 1} ($currentModel) başarısız: $e');
+          if (attempt < maxRetries) {
+            await Future.delayed(Duration(seconds: 1 * (attempt + 1)));
+          }
+        }
+      }
+      print('🔄 Model $currentModel başarısız, sıradaki modele geçiliyor...');
     }
 
-    String imageUrl =
-        'https://gen.pollinations.ai/image/${Uri.encodeComponent(prompt)}'
-        '?model=zimage'
-        '&width=1024'
-        '&height=1024'
-        '&enhance=true'
-        '&nologo=true'
-        '&quality=hd'
-        '&key=$apiKey';
-
-    if (referenceImageUrl != null && referenceImageUrl.isNotEmpty) {
-      imageUrl += '&image=${Uri.encodeComponent(referenceImageUrl)}';
-    }
-
-    final response = await http.get(Uri.parse(imageUrl));
-
-    if (response.statusCode == 200) {
-      final bytes = response.bodyBytes;
-      final base64Image = base64Encode(bytes);
-
-      print(
-        '✅ Pollinations.ai ile görsel oluşturuldu! Boyut: ${bytes.length} bytes',
-      );
-
-      final watermarkedImage = await _addWatermark(
-        'data:image/jpeg;base64,$base64Image',
-      );
-
-      return watermarkedImage;
-    } else {
-      throw Exception('Pollinations.ai hatası: ${response.statusCode}');
-    }
-  } catch (e) {
-    print('❌ Pollinations.ai hatası: $e');
-    rethrow;
+    throw lastException ??
+        Exception('Tüm modeller ve denemeler başarısız oldu.');
   }
-}
-
 
   /// Görsel oluşturma - şu an ana yol Pollinations.ai, Grok/OpenRouter devre dışı
   Future<String> generateImageWithFallback(
     String prompt, {
-    String? negativePrompt,
     bool isTransparent = false,
     String? referenceImageUrl,
+    String? negativePrompt,
   }) async {
     // Şimdilik doğrudan Pollinations.ai üzerinden üretim yap
     // generateImage zaten filigran ekleyerek döner.
     return await generateImage(
       prompt,
-      negativePrompt: negativePrompt,
       referenceImageUrl: referenceImageUrl,
+      negativePrompt: negativePrompt,
     );
   }
 
@@ -121,7 +141,7 @@ class ImageGenerationService {
       final ui.Image mainImage = frameInfo.image;
 
       // Logo4.png'yi yükle
-      final ByteData logoData = await rootBundle.load('logo3.png');
+      final ByteData logoData = await rootBundle.load('assets/logo3.png');
       final Uint8List logoBytes = logoData.buffer.asUint8List();
       final ui.Codec logoCodec = await ui.instantiateImageCodec(logoBytes);
       final ui.FrameInfo logoFrameInfo = await logoCodec.getNextFrame();

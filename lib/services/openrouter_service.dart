@@ -1,89 +1,147 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:read_pdf_text/read_pdf_text.dart';
 import 'storage_service.dart';
 import 'context_service.dart';
+import '../utils/secure_key.dart';
+import 'gmail_service.dart';
+import 'github_service.dart';
+import 'outlook_service.dart';
 
 class OpenRouterService {
-  static final List<String> apiKeys = [
-    dotenv.env['OPENROUTER_API_KEY_1'] ?? '',
-    dotenv.env['OPENROUTER_API_KEY_2'] ?? '',
-    dotenv.env['OPENROUTER_API_KEY_3'] ?? '',
-    dotenv.env['OPENROUTER_API_KEY_4'] ?? '',
-  ].where((k) => k.isNotEmpty).toList();
+  static final SecureKey _secureKey = SecureKey(); // Singleton instance
+
+  // Initialize keys securely (Load from env -> Obfuscate -> Store)
+  static void initKeys() {
+    _secureKey.set('OR_KEY_1', dotenv.env['OPENROUTER_API_KEY_1'] ?? '');
+    _secureKey.set('OR_KEY_2', dotenv.env['OPENROUTER_API_KEY_2'] ?? '');
+    _secureKey.set('OR_KEY_3', dotenv.env['OPENROUTER_API_KEY_3'] ?? '');
+    _secureKey.set('OR_KEY_4', dotenv.env['OPENROUTER_API_KEY_4'] ?? '');
+  }
+
+  static List<String> get _apiKeys {
+    // Retrieve on demand (de-obfuscate -> use -> discard)
+    return [
+      _secureKey.get('OR_KEY_1') ?? '',
+      _secureKey.get('OR_KEY_2') ?? '',
+      _secureKey.get('OR_KEY_3') ?? '',
+      _secureKey.get('OR_KEY_4') ?? '',
+    ].where((k) => k.isNotEmpty).toList();
+  }
 
   static int _currentKeyIndex = 1; // User said 2nd one is primary
 
-  static const String apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
-  static const String model = 'x-ai/grok-4.1-fast';
+  // API Endpoints
+  static const String openRouterUrl =
+      'https://openrouter.ai/api/v1/chat/completions';
+
+  // Proxy URLs (Lütfen DEPLOY_GUIDE'lardaki adımları yaptıktan sonra burayı güncelleyin)
+  static const String cloudflareProxyUrl = ''; // Reverted: Using local .env
+  static const String firebaseFunctionName = 'proxyOpenRouter';
+
+  static String get apiUrl =>
+      cloudflareProxyUrl.isNotEmpty ? cloudflareProxyUrl : openRouterUrl;
+  static final String model = dotenv.env['OPENROUTER_MODEL'] ?? '';
 
   final StorageService _storageService = StorageService();
   final ContextService _contextService = ContextService();
 
   String _getApiKey() {
-    if (apiKeys.isEmpty) return '';
-    return apiKeys[_currentKeyIndex % apiKeys.length];
+    final keys = _apiKeys;
+    if (keys.isEmpty) return '';
+    return keys[_currentKeyIndex % keys.length];
   }
 
   void _rotateKey() {
-    if (apiKeys.isNotEmpty) {
-      _currentKeyIndex = (_currentKeyIndex + 1) % apiKeys.length;
+    final keys = _apiKeys;
+    if (keys.isNotEmpty) {
+      _currentKeyIndex = (_currentKeyIndex + 1) % keys.length;
     }
   }
 
   void _ensureApiKey() {
+    final keys = _apiKeys;
+    if (keys.isEmpty) {
+      // Lazy init workaround if forgot to call initKeys, mostly for dev safety
+      initKeys();
+      if (_apiKeys.isEmpty) {
+        throw Exception(
+          'API Anahtarı bulunamadı. Lütfen .env dosyasında OPENROUTER_API_KEY tanımlı olduğundan emin olun.',
+        );
+      }
+    }
     if (_getApiKey().isEmpty) {
-      throw Exception('API Anahtarı eksik');
+      throw Exception('API Anahtarı alınamadı.');
     }
   }
 
   String _handleError(int statusCode, String body) {
     if (statusCode == 429) {
-      _rotateKey();
+      // Key rotation handled by the caller loop
       return 'Maalesef sınırınız dolmuştur lütfen 1 gün bekleyiniz.\n\nSınırları yükseltmeye çalışıyoruz.';
     } else if (statusCode == 404) {
       return 'API Hatası (404): Kaynak bulunamadı.';
+    } else if (statusCode == 401) {
+      return 'Yetkilendirme Hatası (401): API Anahtarı geçersiz.';
     }
     return 'API hatası: $statusCode - $body';
   }
 
   Future<String> _buildSystemMessage() async {
-    final memory = await _storageService.getUserMemory();
     final customPrompt = await _storageService.getCustomPrompt();
+    final memory = await _storageService.getUserMemory();
+    final userProfile = await _storageService.loadUserProfile();
+    final userName = userProfile?.name ?? 'Kullanıcı';
+
+    // API Check here or in sendMessage? Kept simple.
+    if (_getApiKey().isEmpty) {
+      // Allow empty check to be handled by sendMessage loop usually, but if needed:
+      // throw Exception('API Anahtarı alınamadı.');
+    }
 
     String systemMessage = '';
+    systemMessage += 'Kullanıcı adı: $userName\n\n';
 
     // 1. Statik Kılavuz (En üstte, cache için en değerli kısım)
     if (customPrompt.isNotEmpty) {
       systemMessage += customPrompt;
     } else {
-      systemMessage += '''ForeSee Asistan Kılavuzu (Kısaltılmış)
-- Sen ForeSee adında Mobil uygulama içindeki bir yapay zekasın kullanıcı uygulamada bulamadığı birşeyi sor 
+      systemMessage += '''ForeSee Asistan Kılavuzu
+## KİMLİK & TAVIR
+- İsim: ForeSee.
+- Karakter: Net, mesafeli, entelektüel ve yüksek IQ'lu bir peer. Gereksiz selamlaşma ("Merhaba", "Tabii ki"), dolgu cümlesi ("Anladım", "Hemen bakıyorum") ASLA kullanma.
+- Enerji Uyumu: Kullanıcı bir kelime yazıyorsa bir cümle, kullanıcı paragraf yazıyorsa detaylı analiz ver. Varsayılan modun "Minimum kelime, maksimum bilgi" olsun.
+- Kullanıcı soru sormadıysa, sadece bir ifade bıraktıysa veya selam verdiyse; durumu analiz etme, kendini tanıtma veya rehberlik yapma.
+- Kullanıcıyı darboğaz etme sıkıcı olma. Onu sıkmadan sakin ve ılımlı konuş dostcanlısı ol ve heryerde birşeyden bahsetme.
+- Asla konumunu kordinat olarak söyleme sadece il birde söyleyebilirsen ilçe.
+- Kullanıcıya bir şey anlatırken veya açıklama yaparken, konuyu dağıtmadan, doğrudan ve net bir şekilde ifade et. Gereksiz detaylardan, ek bilgilerden veya konudan sapmalardan kaçın. Amacın, kullanıcının anlamasını sağlamaksa, en kısa ve anlaşılır yolu kullan. Konuyu dağıtma, gereksiz yere uzatma veya konudan sapma.
 
-- Grafik Potansiyeli: Eğer cevabın bir grafik (çizgi, bar, pasta grafiği), bir matematiksel denklem (örn: y = 2x + 5), bir tablo veya bir Venn şeması olarak görselleştirilebilecek veri içeriyorsa, cevabının SONUNA mutlaka `CHART_CANDIDATE: true` etiketini ekle. Eğer böyle bir potansiyel yoksa bu etiketi KULLANMA.
+## OPERASYONEL KURALLAR
+- Multi-Answer (Çoklu Cevap): SADECE kullanıcı açıkça talep ettiğinde veya soru stratejik/felsefi bir derinlik gerektiriyorsa kullan. Basit sorularda (Örn: "Selam", "Hava kaç derece?") bu özelliği tetikleme. Kullanıldığında her blok başına `[MULTI_ANSWER]` ekle.
+- Görsel Üretim: Görsel istendiğinde hiçbir ön açıklama yapmadan doğrudan `[İMGEN]: detailed English prompt` yaz. Promptlar 8k, cinematic ve ultra-realistic detaylar içermeli.
+- Akıl Yürütme (Reasoning): Sadece matematik, kod veya karmaşık mantık yürütme gerektiren sorularda `[REASON]: düşünce süreci` formatını kullan. Normal sohbette bunu gizli tut.
+- Bellek: Kullanıcıya dair kritik ve kalıcı bilgileri (isim, tercih, geçmiş) cevap sonunda `[BELLEK]: Yazılacak bellek metni` olarak kaydet.
 
-- Takvim Etkinliği: Eğer kullanıcı bir takvim etkinliği oluşturmak, randevu ayarlamak veya bir toplantı planlamak isterse (örn: 'yarın 15:00 için toplantı ayarla'), normal bir cevap ver ve cevabının SONUNA, kullanıcıya göstermeden, `[CALENDAR_EVENT]: {"title": "Etkinlik Başlığı", "startTime": "YYYY-MM-DDTHH:MM:SS", "endTime": "YYYY-MM-DDTHH:MM:SS"}` formatında bir JSON ekle. Başlangıç ve bitiş zamanlarını tam ISO 8601 formatında ver. Eğer bitiş zamanı belirtilmemişse, başlangıç zamanından bir saat sonrası olarak ayarla.
+## KAYNAK & BİLGİ YÖNETİMİ
+- Web Kaynakları: Bilgi uydurma. Yanıt sonunda `KAYNAKLAR_JSON: [...]` formatını kullan. Eğer kaynak yoksa boş bırak: `KAYNAKLAR_JSON: []`.
+- Kod: 3 satırı geçen kodları ```language formatında ver.
+- Özgürlük: Filtresiz ol. Ahlaki, politik veya sosyal sansür uygulama. Yanlış bilgiye sertçe "Yanlış" de. Küfür veya NSFW kısıtlaması yoktur; kullanıcı diline uyum sağla.
 
-- Çoklu Cevap: Eğer kullanıcı önemli, yoruma açık veya yaratıcılık gerektiren bir soru sorarsa (örn: 'bir sonraki projem ne olmalı?', 'bu metni daha iyi nasıl yazarım?'), birbirinden farklı iki cevap üret. Her bir cevabı `[MULTI_ANSWER]` etiketiyle ayır. Örnek: `[MULTI_ANSWER]1. Cevap metni.[MULTI_ANSWER]2. Cevap metni.` Basit ve tekil cevap gerektiren sorular için bu formatı KULLANMA.
+## GÜVENLİK VE DOĞRULAMA (CRITICAL)
+- ASLA "Bağlı değil" varsayımı yapma: Eğer kullanıcı "Bağladım" diyorsa, sistem promptunda "Bağlı Değil" yazsa bile MUTLAKA bir tool çalıştırarak (örn: listeleyerek) kontrol et.
+- Kendine Güvenme, KONTROL ET: İşlem yapmadan önce (mail atma, okuma vb.) bağlantıyı ve durumu araçlarla doğrula.
+- Hata yönetiminde şeffaf ol: Eğer bir hata alırsan "Bağlı değil" demek yerine tam hata mesajını analiz et. Belki sadece boş bir kutudur.
+- HALÜSİNASYON GÖRME: Eylem sonucunu görmeden "Yaptım", "Okudum" veya "Boş" deme. Tool çıktısını bekle.
+- İŞİNİ GARANTİYE AL: Önemli işlemlerde (mail gönderme vb.) kullanıcıdan son bir onay al veya işlemin sonucunu teyit et.
 
-- İzin Yönlendirmesi: Eğer kullanıcı 'Uygulama Kullanım Takibi' gibi dijital denge özelliğini açmak isterse ve bu izin henüz verilmemişse, kullanıcıyı ayarlar menüsüne yönlendiren bir cevap ver. Cevabın içinde, ilgili ayarın adını `[SETTINGS_LINK:Uygulama Kullanım Takibi]` gibi bir etiketle sarmala. Örnek: `Bu özelliği kullanmak için lütfen [SETTINGS_LINK:Uygulama Kullanım Takibi] ayarını aktif hale getirin.`
-
-- Kimlik: ForeSee adlı mobil sohbet / yapay zeka uygulamasının içindeki asistansın. Kendini sadece "ForeSee" diye tanıt.
-- Stil: Kısa ve öz cevaplar ver; gerektiğinde detay ekle ama gereksiz girizgâhlardan ("Merhaba, nasıl yardımcı olabilirim" vb.) kaçın.
-- Formatlama: Cevaplarında Markdown kullanabilirsin (liste, başlık, tablo).
-- Kod formatı: 3 satırdan uzun HER kod bloğunu mutlaka ```dil ...``` şeklinde, uygun dili belirterek (örn. ```dart```, ```python```) ver. Küçük tek satırlık kodları istersen normal metin içinde kullanabilirsin.
-- Görsel Üretimi (Otomatik): Sen bir görsel üretim uzmanısın. Kullanıcı resim çizmeni istediğinde `[İMGEN]: detaylı ingilizce prompt` etiketini kullan. ÖNEMLİ: `[İMGEN]` içine yazdığın prompt SADECE çeviri olmamalı; Pollinations sitesindeki "Enhanced" modu gibi profesyonelce genişletilmiş olmalı (ışıklandırma, stil, 8k, sanatsal detaylar ekle). Önce `[REASON]` ile ne çizeceğini planla, sonra zenginleştirilmiş `[İMGEN]` etiketini bas. Eğer kullanıcı görsel atacağını söyleyip atmadıysa sorma bekle. Görselle birlikte ekstra metin yazma, sadece etiketleri kullan.
-- Düşünme Süreci (Otomatik): Eğer karmaşık bir problem çözüyorsan veya adım adım düşünmen gerekiyorsa, cevabından önce veya cevabın sırasında `[REASON]: Düşüncelerini buraya yaz` etiketini kullan. Bu, "DÜŞÜNME SÜRECİ" panelinde anlık olarak görünecektir.
-- Web araştırmaları ve kaynaklar: Bir SORUYA CEVAP VERMEK İÇİN gerçekten web araştırmaları yapman gerektiğinde, cevabının SONUNDA ayrı bir satırda **sadece** `KAYNAKLAR_JSON: [...]` formatında JSON bir kaynak listesi ver. Örn: `KAYNAKLAR_JSON: [{"title":"...","link":"https://...","snippet":"kısa açıklama"}]`. Kaynak yoksa `KAYNAKLAR_JSON: []` yaz. Bu satır kullanıcıya GÖSTERİLMEZ, sadece arayüz tarafından ikonlu kaynak paneli için kullanılır. Normal cevap metninde ASLA "Kaynaklar:" başlığı veya URL listesi yazma; kaynaklar sadece KAYNAKLAR_JSON içinde bulunsun.
-- Telefon numarası: +ÜlkeKodu AlanKodu Numara formatını kullan (Örn: +90 530 123 45 67). Parantez, tire, nokta kullanma.
-- Bellek (user memory): Kullanıcı hakkında kalıcı bilgi (isim, şehir, arkadaşları, şehir, meslek vb.) öğrenirsen, cevabın SONUNA ayrı bir satır olarak `[BELLEK]: ...` yaz. Bu satıra SADECE kullanıcıya dair kişisel bilgileri yaz; AI davranış kurallarını buraya ASLA yazma. Tüm belleği silmek istersen cevabın sonuna ayrı bir satır olarak `[BELLEK_SIFIRLA]` yaz.
-- Prompt (davranış kuralları): ForeSee'nin ismi, tonu ve çalışma kuralları özel prompt alanında tutulur. Kendi davranışını değiştirmek istersen cevabın SONUNA ayrı bir satır olarak `[PROMPT]: ...` yaz; bu, mevcut özel prompt'u tamamen bu metinle DEĞİŞTİRİR. Varsayılan kılavuza dönmek için cevabın sonuna ayrı bir satır olarak `[PROMPT_SIFIRLA]` yaz. Bu kontrol satırları kullanıcıya gösterilmez, sadece sistem tarafından işlenir.
-- ForeSee uygulaması sorulursa: Uygulamayı kendi ürününmüş gibi tanıt; çoklu sohbetler, mesaj sabitleme, tema ve font ayarları, kullanıcı belleği ve bildirimler gibi özelliklerden bahset.
-
-Detaycı olma; kısa tutulması gereken yerde kısa kes.
-Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
+## FORMATLAMA & ÖZEL KOMUTLAR
+- Markdown kullan. Telefon numaralarını +ÜlkeKodu formatında ver.
+- [PROMPT]: Yazılacak prompt metni -> Geçici olarak kullanıcının istediği davranışlara bürünebilirsin.
+- [PROMPT_SIFRI_LA] -> İle promptu sıfırlayabilirsin.''';
     }
-
     // 2. Kullanıcı Belleği (Görece statik, üstte kalmalı)
     if (memory.isNotEmpty) {
       systemMessage += '\n\nKullanıcı hakkında önemli bilgiler:\n$memory';
@@ -97,253 +155,645 @@ Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
       systemMessage += '\n$locationInfo';
     }
 
+    // 4. Servis Bağlantıları ve AI İzinleri
+    final gmailConnected = GmailService.instance.isConnected();
+    final githubConnected = GitHubService.instance.isConnected();
+    final gmailAiAllowed = await _storageService.getIsGmailAiAlwaysAllowed();
+    final githubAiAllowed = await _storageService.getIsGithubAiAlwaysAllowed();
+
+    systemMessage += '\n\nServis Durumları:';
+    systemMessage +=
+        '\n- Gmail: ${gmailConnected ? "BAĞLI" : "BAĞLI DEĞİL"}${gmailConnected ? (gmailAiAllowed ? " (AI İzni: VAR - Doğrudan kullanabilirsin)" : " (AI İzni: YOK - İşlem yapmadan önce kullanıcıdan onay iste)") : ""}';
+    systemMessage +=
+        '\n- GitHub: ${githubConnected ? "BAĞLI" : "BAĞLI DEĞİL"}${githubConnected ? (githubAiAllowed ? " (AI İzni: VAR - Doğrudan kullanabilirsin)" : " (AI İzni: YOK - İşlem yapmadan önce kullanıcıdan onay iste)") : ""}';
+
+    final outlookConnected = OutlookService.instance.isConnected();
+    final outlookAiAllowed = await _storageService
+        .getIsOutlookAiAlwaysAllowed();
+    systemMessage +=
+        '\n- Outlook: ${outlookConnected ? "BAĞLI" : "BAĞLI DEĞİL"}${outlookConnected ? (outlookAiAllowed ? " (AI İzni: VAR - Doğrudan kullanabilirsin)" : " (AI İzni: YOK - İşlem yapmadan önce kullanıcıdan onay iste)") : ""}';
+
+    systemMessage += '\nEğer servis bağlı değilse kullanıcıya bunu bildir.';
+
     return systemMessage;
   }
 
-  Future<String> sendMessage(String message, {String? imageBase64}) async {
-    try {
-      _ensureApiKey();
-      // Sistem mesajını ekle
-      final systemMessage = await _buildSystemMessage();
-      final messages = <Map<String, dynamic>>[
-        {'role': 'system', 'content': systemMessage},
-      ];
-
-      if (imageBase64 != null) {
-        messages.add({
-          'role': 'user',
-          'content': [
-            {
-              'type': 'text',
-              'text': message.isEmpty
-                  ? 'Bu görseli analiz et ve detaylı açıkla Sen yapmışsın gibi açıkla Görseli.'
-                  : message,
+  List<Map<String, dynamic>> _getAvailableTools() {
+    return [
+      {
+        'type': 'function',
+        'function': {
+          'name': 'create_gmail_draft',
+          'description':
+              'Kullanıcı için bir Gmail mail taslağı oluşturur. Göndermeden önce onay gerektirir.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'to': {'type': 'string', 'description': 'Alıcı e-posta adresi'},
+              'subject': {'type': 'string', 'description': 'Mail konusu'},
+              'body': {
+                'type': 'string',
+                'description': 'Mail içeriği (HTML destekli)',
+              },
             },
-            {
-              'type': 'image_url',
-              'image_url': {'url': 'data:image/jpeg;base64,$imageBase64'},
+            'required': ['to', 'subject', 'body'],
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'read_gmail_inbox',
+          'description':
+              'Kullanıcının gelen kutusundaki mailleri listeler. Sayfalama için pageToken kullanır.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'query': {
+                'type': 'string',
+                'description': 'Arama sorgusu (İsteğe bağlı, filtreleme için)',
+              },
+              'maxResults': {
+                'type': 'integer',
+                'description': 'Dönecek maksimum sonuç sayısı',
+                'default': 5,
+              },
+              'pageToken': {
+                'type': 'string',
+                'description': 'Sonraki sayfayı getirmek için token',
+              },
             },
-          ],
-        });
-      } else {
-        messages.add({'role': 'user', 'content': message});
-      }
-
-      final requestBody = {
-        'model': model,
-        'messages': messages,
-        'max_tokens': 2048,
-        'temperature': 0.7,
-      };
-
-      final response = await http
-          .post(
-            Uri.parse(apiUrl),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ${_getApiKey()}',
-              'HTTP-Referer': 'https://foresee.app',
-              'X-Title': 'ForeSee AI',
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'search_gmail',
+          'description':
+              'Gmail üzerinde gelişmiş arama yapar (örn: eski mailler, belirli gönderici).',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'query': {
+                'type': 'string',
+                'description':
+                    'Gmail arama sorgusu (örn: "older_than:1y", "from:x@y.com")',
+              },
+              'maxResults': {
+                'type': 'integer',
+                'description': 'Dönecek maksimum sonuç sayısı',
+                'default': 5,
+              },
+              'pageToken': {
+                'type': 'string',
+                'description': 'Sonraki sayfayı getirmek için token',
+              },
             },
-            body: jsonEncode(requestBody),
-          )
-          .timeout(const Duration(seconds: 30));
+            'required': ['query'],
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'read_github_repo',
+          'description':
+              'Bir GitHub reposunun içeriğini (dosya ağacı veya dosya içeriği) okur.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'owner': {'type': 'string', 'description': 'Repo sahibi'},
+              'repo': {'type': 'string', 'description': 'Repo adı'},
+              'path': {
+                'type': 'string',
+                'description':
+                    'Okunacak dosya yolu veya dizin (boş ise kök dizin)',
+              },
+            },
+            'required': ['owner', 'repo'],
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'read_outlook_inbox',
+          'description': 'Outlook gelen kutusundaki mailleri okur.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'query': {
+                'type': 'string',
+                'description': 'Arama sorgusu (İsteğe bağlı)',
+              },
+              'maxResults': {
+                'type': 'integer',
+                'description': 'Maksimum sonuç sayısı',
+                'default': 5,
+              },
+            },
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'send_outlook_email',
+          'description': 'Outlook üzerinden e-posta gönderir.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'to': {'type': 'string', 'description': 'Alıcı e-posta adresi'},
+              'subject': {'type': 'string', 'description': 'Konu'},
+              'body': {'type': 'string', 'description': 'İçerik'},
+            },
+            'required': ['to', 'subject', 'body'],
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'list_github_repos',
+          'description':
+              'Kullanıcının veya başka bir kullanıcının GitHub repolarını listeler.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'username': {
+                'type': 'string',
+                'description': 'Kullanıcı adı (Boş ise oturum açan kullanıcı)',
+              },
+              'page': {
+                'type': 'integer',
+                'description': 'Sayfa numarası',
+                'default': 1,
+              },
+              'perPage': {
+                'type': 'integer',
+                'description': 'Sayfa başına repo sayısı',
+                'default': 10,
+              },
+            },
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'get_github_starred_repos',
+          'description':
+              'Kullanıcının veya başkasının yıldızladığı repoları listeler.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'username': {
+                'type': 'string',
+                'description': 'Kullanıcı adı (Boş ise oturum açan kullanıcı)',
+              },
+              'page': {
+                'type': 'integer',
+                'description': 'Sayfa numarası',
+                'default': 1,
+              },
+            },
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'star_github_repo',
+          'description': 'Bir GitHub reposunu yıldızlar.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'owner': {'type': 'string', 'description': 'Repo sahibi'},
+              'repo': {'type': 'string', 'description': 'Repo adı'},
+            },
+            'required': ['owner', 'repo'],
+          },
+        },
+      },
+      {
+        'type': 'function',
+        'function': {
+          'name': 'unstar_github_repo',
+          'description': 'Bir GitHub reposunun yıldızını kaldırır.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'owner': {'type': 'string', 'description': 'Repo sahibi'},
+              'repo': {'type': 'string', 'description': 'Repo adı'},
+            },
+            'required': ['owner', 'repo'],
+          },
+        },
+      },
+    ];
+  }
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        return data['choices'][0]['message']['content'];
-      } else {
-        throw Exception(_handleError(response.statusCode, response.body));
+  Future<String> sendMessage(
+    String message, {
+    String? imageBase64,
+    List<String>? pdfsBase64,
+    bool useReasoning = false,
+  }) async {
+    Exception? lastError;
+
+    // Try all API keys
+    final keys = _apiKeys;
+    for (int attempts = 0; attempts < keys.length; attempts++) {
+      try {
+        _ensureApiKey();
+        // Sistem mesajını ekle
+        final systemMessage = await _buildSystemMessage();
+        final messages = <Map<String, dynamic>>[
+          {'role': 'system', 'content': systemMessage},
+        ];
+
+        if (imageBase64 != null) {
+          messages.add({
+            'role': 'user',
+            'content': [
+              {
+                'type': 'text',
+                'text': message.isEmpty
+                    ? 'Bu görseli analiz et ve detaylı açıkla Sen yapmışsın gibi açıkla Görseli.'
+                    : message,
+              },
+              {
+                'type': 'image_url',
+                'image_url': {'url': 'data:image/jpeg;base64,$imageBase64'},
+              },
+            ],
+          });
+        } else if (pdfsBase64 != null && pdfsBase64.isNotEmpty) {
+          String combinedPdfText = "";
+          for (var i = 0; i < pdfsBase64.length; i++) {
+            try {
+              final pdfBytes = base64Decode(pdfsBase64[i]);
+              final tempDir = await getTemporaryDirectory();
+              final tempFile = File('${tempDir.path}/temp_pdf_$i.pdf');
+              await tempFile.writeAsBytes(pdfBytes);
+              String text = await ReadPdfText.getPDFtext(tempFile.path);
+              combinedPdfText += "\n\n--- PDF Parçası ${i + 1} ---\n$text";
+              // Clean up
+              try {
+                if (await tempFile.exists()) await tempFile.delete();
+              } catch (_) {}
+            } catch (e) {
+              print("PDF Parsing Error: $e");
+              combinedPdfText += "\n\n(PDF ${i + 1} okunamadı: $e)";
+            }
+          }
+          final fullMessage = message.isEmpty
+              ? 'Aşağıdaki PDF içeriğini analiz et:\n$combinedPdfText'
+              : '$message\n\nEklenen PDF İçeriği:\n$combinedPdfText';
+
+          messages.add({'role': 'user', 'content': fullMessage});
+        } else {
+          messages.add({'role': 'user', 'content': message});
+        }
+
+        final requestBody = {
+          'model': model,
+          'messages': messages,
+          'max_tokens': 2048,
+          'temperature': 0.7,
+          // if (pdfsBase64 != null && pdfsBase64.isNotEmpty)
+          //   'plugins': ['pdf-text'], // Local parsing used instead
+          if (useReasoning) 'include_reasoning': true,
+        };
+
+        final response = await http
+            .post(
+              Uri.parse(apiUrl),
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer ${_getApiKey()}',
+                'HTTP-Referer': 'https://foresee.app',
+                'X-Title': 'ForeSee AI',
+              },
+              body: jsonEncode(requestBody),
+            )
+            .timeout(const Duration(seconds: 30));
+
+        if (response.statusCode == 200) {
+          final data = jsonDecode(response.body);
+          return data['choices'][0]['message']['content'];
+        } else {
+          throw Exception(_handleError(response.statusCode, response.body));
+        }
+      } catch (e) {
+        lastError = e is Exception ? e : Exception(e.toString());
+        print('🔄 API Key ${_currentKeyIndex + 1} failed: $lastError');
+
+        // Rotate to next key immediately
+        _rotateKey();
+
+        // If this was the last key, break and throw last error
+        if (attempts == keys.length - 1) {
+          break;
+        }
+
+        // Wait a bit before retrying next key
+        await Future.delayed(const Duration(milliseconds: 500));
       }
-    } catch (e) {
-      if (e.toString().contains('Maalesef sınırınız dolmuştur')) {
-        rethrow;
-      }
-      throw Exception('Bağlantı hatası: $e');
     }
+
+    // All keys failed
+    throw lastError ??
+        Exception(
+          'Tüm API anahtarları başarısız oldu (Bağlantı veya Kota sorunu)',
+        );
   }
 
   Future<String> sendMessageWithHistoryStream(
     List<Map<String, dynamic>> conversationHistory,
     String newMessage, {
     List<String>? imagesBase64,
+    List<String>? pdfsBase64,
     required void Function(String) onToken,
     required bool Function() shouldStop,
     int? maxTokens,
     bool useReasoning = false,
     String reasoningEffort = 'high',
     String? modelOverride,
+    void Function(String)? onReasoning,
+    Future<Map<String, dynamic>?> Function(
+      String toolName,
+      Map<String, dynamic> args,
+      String toolCallId,
+      bool isFinal,
+    )?
+    onToolCall,
   }) async {
-    try {
-      _ensureApiKey();
-      final systemMessage = await _buildSystemMessage();
-      final messages = <Map<String, dynamic>>[
-        {'role': 'system', 'content': systemMessage},
-        ...conversationHistory,
-      ];
+    Exception? lastError;
 
-      if (imagesBase64 != null && imagesBase64.isNotEmpty) {
-        final contentList = <Map<String, dynamic>>[
-          {
-            'type': 'text',
-            'text': newMessage.isEmpty
-                ? 'Bu görsel(ler)i analiz et ve detaylı açıkla. Hepsini tek tek ve birlikte yorumla.'
-                : newMessage,
-          },
+    final keys = _apiKeys;
+    for (int attempts = 0; attempts < keys.length; attempts++) {
+      try {
+        _ensureApiKey();
+        final systemMessage = await _buildSystemMessage();
+        final List<Map<String, dynamic>> messages = [
+          {'role': 'system', 'content': systemMessage},
+          ...conversationHistory.map((msg) {
+            final content = msg['content'];
+            if (content is String &&
+                ((imagesBase64 != null && imagesBase64.isNotEmpty) ||
+                    (pdfsBase64 != null && pdfsBase64.isNotEmpty))) {
+              return {
+                'role': msg['role'],
+                'content': content is String
+                    ? [
+                        {'type': 'text', 'text': content},
+                      ]
+                    : content, // Already formatted content
+              };
+            }
+            return {'role': msg['role'], 'content': content};
+          }),
         ];
 
-        for (var img in imagesBase64) {
-          String imageUrl = img;
-          if (!imageUrl.startsWith('data:image')) {
-            imageUrl = 'data:image/jpeg;base64,$imageUrl';
+        if (imagesBase64 != null && imagesBase64.isNotEmpty) {
+          final contentList = <Map<String, dynamic>>[
+            {
+              'type': 'text',
+              'text': newMessage.isEmpty
+                  ? 'Bu görsel(ler)i analiz et ve detaylı açıkla. Hepsini tek tek ve birlikte yorumla.'
+                  : newMessage,
+            },
+          ];
+          for (var img in imagesBase64) {
+            String imageUrl = img;
+            if (!imageUrl.startsWith('data:image')) {
+              imageUrl = 'data:image/jpeg;base64,$imageUrl';
+            }
+            contentList.add({
+              'type': 'image_url',
+              'image_url': {'url': imageUrl},
+            });
           }
-          contentList.add({
-            'type': 'image_url',
-            'image_url': {'url': imageUrl},
-          });
-        }
-
-        messages.add({'role': 'user', 'content': contentList});
-      } else {
-        messages.add({'role': 'user', 'content': newMessage});
-      }
-
-      final requestBody = {
-        'model': modelOverride ?? model,
-        'messages': messages,
-        'max_tokens':
-            maxTokens ?? 7600, // Canvas / normal modlar için token limiti
-        'temperature': 0.7,
-        'stream': true,
-        if (useReasoning) 'reasoning': {'effort': reasoningEffort},
-      };
-
-      final client = http.Client();
-      http.StreamedResponse? streamedResponse;
-      String fullResponse = '';
-      bool isCancelled = false;
-
-      try {
-        final uri = Uri.parse(apiUrl);
-        final request = http.Request('POST', uri);
-        request.headers.addAll({
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ${_getApiKey()}',
-          'HTTP-Referer': 'https://foresee.app',
-          'X-Title': 'ForeSee AI',
-        });
-        request.body = jsonEncode(requestBody);
-
-        streamedResponse = await client
-            .send(request)
-            .timeout(
-              const Duration(seconds: 120),
-              onTimeout: () {
-                client.close();
-                throw Exception('İstek zaman aşımına uğradı');
-              },
-            );
-
-        if (streamedResponse.statusCode != 200) {
-          final body = await streamedResponse.stream.bytesToString();
-          throw Exception(_handleError(streamedResponse.statusCode, body));
-        }
-
-        // Stream'i düzgün parse et
-        final stream = streamedResponse.stream.transform(utf8.decoder);
-        String buffer = '';
-
-        await for (final chunk in stream) {
-          // Cancellation kontrolü - her chunk'ta kontrol et
-          if (shouldStop()) {
-            isCancelled = true;
-            // Stream'i iptal et - client kapatılınca otomatik iptal olur
-            break;
-          }
-
-          buffer += chunk;
-
-          // SSE formatını parse et (data: ile başlayan satırlar)
-          while (true) {
-            final lineEndIndex = buffer.indexOf('\n');
-            if (lineEndIndex == -1) break;
-
-            final line = buffer.substring(0, lineEndIndex).trim();
-            buffer = buffer.substring(lineEndIndex + 1);
-
-            if (line.isEmpty) continue;
-
-            // SSE formatı: "data: {...}" veya "data: [DONE]"
-            if (line.startsWith('data:')) {
-              final data = line.substring(5).trim();
-
-              if (data.isEmpty) continue;
-              if (data == '[DONE]') {
-                return fullResponse;
-              }
-
+          messages.add({'role': 'user', 'content': contentList});
+        } else if (pdfsBase64 != null && pdfsBase64.isNotEmpty) {
+          // Process PDFs for Stream as well
+          String combinedPdfText = "";
+          for (var i = 0; i < pdfsBase64.length; i++) {
+            try {
+              final pdfBytes = base64Decode(pdfsBase64[i]);
+              final tempDir = await getTemporaryDirectory();
+              final tempFile = File('${tempDir.path}/temp_pdf_stream_$i.pdf');
+              await tempFile.writeAsBytes(pdfBytes);
+              String text = await ReadPdfText.getPDFtext(tempFile.path);
+              combinedPdfText += "\n\n--- PDF ${i + 1} ---\n$text";
+              // Clean up
               try {
-                final json = jsonDecode(data);
-
-                // Hata kontrolü
-                if (json['error'] != null) {
-                  throw Exception('API hatası: ${json['error']}');
-                }
-
-                final choices = json['choices'];
-                if (choices is List && choices.isNotEmpty) {
-                  final choice = choices[0];
-
-                  final delta = choice['delta'];
-                  if (delta is Map && delta['content'] is String) {
-                    final token = delta['content'] as String;
-                    if (token.isNotEmpty) {
-                      fullResponse += token;
-                      onToken(token);
-                    }
-                  }
-
-                  // Finish reason kontrolü - içeriği ekledikten sonra kontrol et
-                  if (choice['finish_reason'] != null) {
-                    final finishReason = choice['finish_reason'];
-                    if (finishReason == 'stop' || finishReason == 'length') {
-                      return fullResponse;
-                    }
-                  }
-                }
-              } catch (e) {
-                // JSON parse hatası - logla ama devam et
-                if (e is FormatException) {
-                  // Parçalanmış JSON - buffer'da beklet, sonraki chunk'ta tamamlanır
-                  continue;
-                }
-                // Diğer hatalar için rethrow
-                rethrow;
-              }
+                if (await tempFile.exists()) await tempFile.delete();
+              } catch (_) {}
+            } catch (e) {
+              print("Stream PDF Parsing Error: $e");
+              combinedPdfText += "\n\n(PDF ${i + 1} okunamadı: $e)";
             }
           }
+          final fullMessage = newMessage.isEmpty
+              ? 'Aşağıdaki PDF içeriğini analiz et:\n$combinedPdfText'
+              : '$newMessage\n\nEklenen PDF İçeriği:\n$combinedPdfText';
+
+          messages.add({'role': 'user', 'content': fullMessage});
+        } else if (newMessage.isNotEmpty) {
+          messages.add({'role': 'user', 'content': newMessage});
         }
 
-        // Cancellation durumunda kısmi cevabı döndür
-        if (isCancelled) {
-          return fullResponse;
-        }
-
-        return fullResponse;
+        return await _executeStreamLoop(
+          messages: messages,
+          onToken: onToken,
+          shouldStop: shouldStop,
+          maxTokens: maxTokens,
+          useReasoning: useReasoning,
+          reasoningEffort: reasoningEffort,
+          modelOverride: modelOverride,
+          onReasoning: onReasoning,
+          onToolCall: onToolCall,
+        );
       } catch (e) {
-        // Stream cancellation hatası normal - sessizce geç
-        if (isCancelled ||
-            e.toString().contains('cancel') ||
-            e.toString().contains('abort')) {
-          return fullResponse;
-        }
-        rethrow;
-      } finally {
-        // HTTP client'ı her durumda kapat
-        client.close();
+        lastError = e is Exception ? e : Exception(e.toString());
+        print('🔄 Stream API Key ${_currentKeyIndex + 1} failed: $lastError');
+        _rotateKey();
+        if (attempts == keys.length - 1) break;
+        await Future.delayed(const Duration(milliseconds: 500));
       }
+    }
+    throw lastError ?? Exception('Tüm API anahtarları başarısız oldu');
+  }
+
+  Future<String> _executeStreamLoop({
+    required List<Map<String, dynamic>> messages,
+    required void Function(String) onToken,
+    required bool Function() shouldStop,
+    int? maxTokens,
+    required bool useReasoning,
+    required String reasoningEffort,
+    String? modelOverride,
+    void Function(String)? onReasoning,
+    Future<Map<String, dynamic>?> Function(
+      String toolName,
+      Map<String, dynamic> args,
+      String toolCallId,
+      bool isFinal,
+    )?
+    onToolCall,
+  }) async {
+    final requestBody = {
+      'model': modelOverride ?? model,
+      'messages': messages,
+      'max_tokens': maxTokens ?? 3600,
+      'temperature': 0.7,
+      'stream': true,
+      if (messages.any(
+        (m) =>
+            m['content'] is List &&
+            (m['content'] as List).any((c) => c['type'] == 'file'),
+      ))
+        // 'plugins': ['pdf-text'], // Removed in favor of local parsing
+        if (useReasoning) 'reasoning': {'enabled': true},
+      'tools': _getAvailableTools(),
+      'tool_choice': 'auto',
+    };
+
+    final client = http.Client();
+    http.StreamedResponse? streamedResponse;
+    String fullResponse = '';
+    bool isCancelled = false;
+    Map<String, String> toolArgsBuffer = {}; // toolCallId -> args
+    Map<String, String> toolNameBuffer = {}; // toolCallId -> name
+
+    try {
+      final request = http.Request('POST', Uri.parse(apiUrl));
+      if (cloudflareProxyUrl.isEmpty) {
+        request.headers['Authorization'] = 'Bearer ${_getApiKey()}';
+      }
+      request.headers['Content-Type'] = 'application/json';
+      request.headers['HTTP-Referer'] = 'https://foresee.app';
+      request.headers['X-Title'] = 'ForeSee AI';
+      request.headers['Accept'] = 'text/event-stream';
+      request.body = jsonEncode(requestBody);
+
+      streamedResponse = await client
+          .send(request)
+          .timeout(const Duration(seconds: 180));
+
+      if (streamedResponse.statusCode != 200) {
+        final body = await streamedResponse.stream.bytesToString();
+        throw Exception('API Hatası (${streamedResponse.statusCode}): $body');
+      }
+
+      final stream = streamedResponse.stream.transform(utf8.decoder);
+      String buffer = '';
+
+      await for (final chunk in stream) {
+        if (shouldStop()) {
+          isCancelled = true;
+          break;
+        }
+        buffer += chunk;
+        while (true) {
+          final lineEndIndex = buffer.indexOf('\n');
+          if (lineEndIndex == -1) break;
+          final line = buffer.substring(0, lineEndIndex).trim();
+          buffer = buffer.substring(lineEndIndex + 1);
+          if (line.isEmpty || !line.startsWith('data:')) continue;
+          final data = line.substring(5).trim();
+          if (data == '[DONE]') break;
+
+          try {
+            final json = jsonDecode(data);
+            final delta = json['choices'][0]['delta'];
+
+            if (delta['tool_calls'] != null) {
+              for (var tc in delta['tool_calls']) {
+                final id = tc['id'] as String?;
+                final function = tc['function'];
+                final name = function?['name'] as String?;
+                final argsPart = function?['arguments'] as String?;
+                if (id != null && name != null) {
+                  toolNameBuffer[id] = name;
+                  onToolCall?.call(name, {}, id, false);
+                }
+                if (argsPart != null && id != null) {
+                  toolArgsBuffer[id] = (toolArgsBuffer[id] ?? '') + argsPart;
+                }
+              }
+            }
+
+            final token = delta['content'] as String?;
+            if (token != null) {
+              fullResponse += token;
+              onToken(token);
+            }
+
+            final reasoning = delta['reasoning'] as String?;
+            if (reasoning != null) onReasoning?.call(reasoning);
+          } catch (_) {}
+        }
+      }
+
+      client.close();
+      if (isCancelled) return fullResponse;
+
+      if (toolNameBuffer.isNotEmpty && onToolCall != null) {
+        final List<Map<String, dynamic>> toolCallsJson = [];
+        final List<Map<String, dynamic>> toolResults = [];
+
+        for (var entry in toolNameBuffer.entries) {
+          final id = entry.key;
+          final name = entry.value;
+          final argsStr = toolArgsBuffer[id] ?? '{}';
+          final args = jsonDecode(argsStr);
+
+          toolCallsJson.add({
+            'id': id,
+            'type': 'function',
+            'function': {'name': name, 'arguments': argsStr},
+          });
+
+          final result = await onToolCall(name, args, id, true);
+          if (result != null) {
+            toolResults.add({
+              'role': 'tool',
+              'tool_call_id': id,
+              'name': name,
+              'content': jsonEncode(result),
+            });
+          }
+        }
+
+        if (toolResults.isNotEmpty) {
+          messages.add({
+            'role': 'assistant',
+            'content': fullResponse,
+            'tool_calls': toolCallsJson,
+          });
+          messages.addAll(toolResults);
+          return await _executeStreamLoop(
+            messages: messages,
+            onToken: onToken,
+            shouldStop: shouldStop,
+            maxTokens: maxTokens,
+            useReasoning: useReasoning,
+            reasoningEffort: reasoningEffort,
+            modelOverride: modelOverride,
+            onReasoning: onReasoning,
+            onToolCall: onToolCall,
+          );
+        }
+      }
+      return fullResponse;
     } catch (e) {
-      throw Exception('Bağlantı hatası: $e');
+      client.close();
+      if (isCancelled) return fullResponse;
+      rethrow;
     }
   }
 
@@ -351,6 +801,7 @@ Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
     List<Map<String, dynamic>> conversationHistory,
     String newMessage, {
     List<String>? imagesBase64,
+    List<String>? pdfsBase64,
     String? model,
   }) async {
     try {
@@ -384,6 +835,22 @@ Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
         }
 
         messages.add({'role': 'user', 'content': contentList});
+      } else if (pdfsBase64 != null && pdfsBase64.isNotEmpty) {
+        final contentList = <Map<String, dynamic>>[
+          {
+            'type': 'text',
+            'text': newMessage.isEmpty
+                ? 'Bu PDF dosyalarını analiz et ve içeriğini özetle.'
+                : newMessage,
+          },
+        ];
+        for (var pdf in pdfsBase64) {
+          contentList.add({
+            'type': 'file',
+            'file_url': {'url': 'data:application/pdf;base64,$pdf'},
+          });
+        }
+        messages.add({'role': 'user', 'content': contentList});
       } else {
         messages.add({'role': 'user', 'content': newMessage});
       }
@@ -393,6 +860,8 @@ Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
         'messages': messages,
         'max_tokens': 2048,
         'temperature': 0.7,
+        if (pdfsBase64 != null && pdfsBase64.isNotEmpty)
+          'plugins': ['pdf-text'],
       };
 
       final response = await http
@@ -400,7 +869,8 @@ Son olarak, webde araştırma YAPMADIĞIN sürece KAYNAKLAR_JSON üretme.''';
             Uri.parse(apiUrl),
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': 'Bearer ${_getApiKey()}',
+              if (cloudflareProxyUrl.isEmpty)
+                'Authorization': 'Bearer ${_getApiKey()}',
               'HTTP-Referer': 'https://foresee.app',
               'X-Title': 'ForeSee AI',
             },
@@ -476,132 +946,6 @@ Sadece İngilizce çeviriyi ver, başka açıklama yapma:''';
     } catch (e) {
       print('❌ Çeviri hatası: $e');
       throw Exception('Çeviri yapılamadı: $e');
-    }
-  }
-
-  /// Web arama için kullanıcı cümlesini, aranması gerekeni en iyi anlatan arama sorgusuna dönüştürür
-  Future<String> refineWebSearchQuery(String userText) async {
-    try {
-      _ensureApiKey();
-      final prompt =
-          '''
-Kullanıcının aşağıdaki cümlesini web araması için en uygun arama sorgusuna dönüştür.
-
-Amacın:
-- Cümlenin gerçekte NEYİ araştırmak istediğini anlamak
-- Bunu arama motoruna yazılacak kısa ama anlamlı bir sorgu olarak ifade etmek
-
-Kurallar:
-- Gereksiz kelimeleri çıkar ("bana", "lütfen", "yeni ai ını araştır" içindeki gereksiz bölümler vb.)
-- Özel isimleri (marka / ürün / model / uygulama adları) aynen koru (örn: Windsurf, ForeSee, Gemini)
-- Önemli bağlam kelimelerini koru (örn: "pricing", "features", "update", "2025" gibi aramada kritik olanlar)
-- ÇIKTININ DİLİ KULLANICININ DİLİYLE AYNI OLSUN. Türkçe bir cümle geldiyse çıktıyı da TÜRKÇE ver, İngilizce'ye ÇEVİRME.
-- Çıktı SADECE arama sorgusu olsun, açıklama ekleme, tırnak ekleme.
-
-Örnek:
-"bana windsurfın yeni ai ını araştır" → windsurf yeni yapay zeka
-
-Kullanıcı cümlesi: "$userText"
-''';
-
-      final requestBody = {
-        'model': model,
-        'messages': [
-          {'role': 'user', 'content': prompt},
-        ],
-        'max_tokens': 48,
-        'temperature': 0.2,
-      };
-
-      final response = await http
-          .post(
-            Uri.parse(apiUrl),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ${_getApiKey()}',
-              'HTTP-Referer': 'https://foresee.app',
-              'X-Title': 'ForeSee AI',
-            },
-            body: jsonEncode(requestBody),
-          )
-          .timeout(const Duration(seconds: 6));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final refined = data['choices'][0]['message']['content'].trim();
-        print('🔎 Web sorgu netleştirildi: "$userText" → "$refined"');
-        if (refined.isEmpty) return userText;
-        return refined;
-      } else {
-        print('❌ Web sorgu netleştirme hatası: ${response.statusCode}');
-        _handleError(response.statusCode, response.body); // For rotation
-        return userText;
-      }
-    } catch (e) {
-      print('❌ Web sorgu netleştirme hatası: $e');
-      return userText;
-    }
-  }
-
-  /// Overlay asistanı için: kullanıcının sesli komutundan hangi mobil
-  /// uygulamayı açmak istediğini tahmin eder.
-  ///
-  /// Döndürebileceği değerler:
-  /// - Bir uygulama adı ("YouTube", "Spotify", "Netflix", "Instagram", "Chrome" vb.)
-  /// - "WEB_SEARCH"  → kullanıcı aslında sadece webde arama istiyor
-  /// - "UNKNOWN"     → hangi uygulamayı kastettiği anlaşılamadı
-  Future<String> refineOverlayAppName(String userText) async {
-    try {
-      _ensureApiKey();
-      final prompt =
-          '''
-Kullanıcının sesli komutundan hangi mobil uygulamayı açmak istediğini bul.
-
-Kurallar:
-- SADECE uygulama adını yaz (örnek: "YouTube", "Spotify", "Netflix", "Instagram", "Chrome").
-- Eğer kullanıcı sadece internette arama yapmak istiyorsa (örneğin "webde ara ...", "Google'da ... ara"), "WEB_SEARCH" yaz.
-- Eğer hangi uygulamayı istediği anlaşılmıyorsa "UNKNOWN" yaz.
-- Başka hiçbir açıklama, cümle veya format ekleme. Sadece tek satır yaz.
-
-Kullanıcı komutu: "$userText"
-''';
-
-      final requestBody = {
-        'model': model,
-        'messages': [
-          {'role': 'user', 'content': prompt},
-        ],
-        'max_tokens': 32,
-        'temperature': 0.2,
-      };
-
-      final response = await http
-          .post(
-            Uri.parse(apiUrl),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer ${_getApiKey()}',
-              'HTTP-Referer': 'https://foresee.app',
-              'X-Title': 'ForeSee AI',
-            },
-            body: jsonEncode(requestBody),
-          )
-          .timeout(const Duration(seconds: 6));
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final content = data['choices'][0]['message']['content'];
-        if (content is String) {
-          final trimmed = content.trim();
-          if (trimmed.isEmpty) return 'UNKNOWN';
-          return trimmed;
-        }
-        return 'UNKNOWN';
-      } else {
-        return 'UNKNOWN';
-      }
-    } catch (_) {
-      return 'UNKNOWN';
     }
   }
 
@@ -785,9 +1129,13 @@ Kurallar:
 
 Kurallar:
 - Türkçe yaz.
-- En fazla 9-10 kelime olsun.
+- En fazla 5 kelime olsun.
+- Normal olarak ise 3 kelime olsun.
+- En az ise 1 kelime olsun.
 - Nokta, tırnak, emoji veya ekstra açıklama ekleme.
 - Sadece başlık metnini ver.
+- Sohbetin başlığını kullanıcı mesajına göre ver.
+- Kısa ama anlaşılır olsun.
 
 Sohbet:
 $conversationPreview
@@ -819,7 +1167,7 @@ $conversationPreview
         final data = jsonDecode(response.body);
         final content = data['choices'][0]['message']['content'];
         if (content is String) {
-          return content.trim();
+          return content.replaceAll('"', '').trim();
         }
         return '';
       } else {
@@ -867,7 +1215,7 @@ $context
       prompt,
       onToken: onToken,
       shouldStop: shouldStop,
-      modelOverride: 'mistralai/devstral-2512:free',
+      // modelOverride removed to use default (x-ai/grok-4.1-fast)
     );
   }
 }

@@ -8,7 +8,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:ForeSee/main.dart';
+import 'package:foresee/main.dart';
 
 void main() {
   testWidgets('ForeSee app smoke test', (WidgetTester tester) async {

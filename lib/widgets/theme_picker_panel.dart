@@ -18,7 +18,6 @@ class ThemePickerPanel extends StatefulWidget {
 class _ThemePickerPanelState extends State<ThemePickerPanel> {
   late int _selectedThemeIndex;
 
-
   @override
   void initState() {
     super.initState();
@@ -26,9 +25,7 @@ class _ThemePickerPanelState extends State<ThemePickerPanel> {
   }
 
   void _onDone() {
-    Navigator.of(context).pop({
-      'themeIndex': _selectedThemeIndex,
-    });
+    Navigator.of(context).pop({'themeIndex': _selectedThemeIndex});
   }
 
   @override
@@ -71,28 +68,60 @@ class _ThemePickerPanelState extends State<ThemePickerPanel> {
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                            color: isSelected ? Colors.blue : Colors.white24,
+                            color: isSelected
+                                ? Colors.blue
+                                : (Theme.of(context).brightness ==
+                                          Brightness.dark
+                                      ? Colors.white.withOpacity(0.2)
+                                      : Colors.black.withOpacity(0.1)),
                             width: isSelected ? 3 : 1,
                           ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.05),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
                           // Sistem teması için dinamik önizleme
                           color: theme.name == 'Sistem'
-                              ? (MediaQuery.of(context).platformBrightness == Brightness.dark
-                                  ? const Color(0xFF000000) // Saf siyah
-                                  : const Color(0xFFFFFFFF)) // Beyaz
+                              ? (MediaQuery.of(context).platformBrightness ==
+                                        Brightness.dark
+                                    ? const Color(0xFF121212)
+                                    : const Color(0xFFFFFFFF))
                               : theme.backgroundColor,
                         ),
                         child: Center(
-                          child: Text(
-                            theme.name,
-                            style: TextStyle(
-                              // Sistem teması için dinamik metin rengi
-                              color: theme.name == 'Sistem'
-                                  ? (MediaQuery.of(context).platformBrightness == Brightness.dark
-                                      ? Colors.white
-                                      : Colors.black)
-                                  : (theme.brightness == Brightness.dark ? Colors.white : Colors.black),
-                              fontWeight: FontWeight.bold,
-                            ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                theme.name,
+                                style: TextStyle(
+                                  color: theme.name == 'Sistem'
+                                      ? (MediaQuery.of(
+                                                  context,
+                                                ).platformBrightness ==
+                                                Brightness.dark
+                                            ? Colors.white
+                                            : Colors.black)
+                                      : (theme.brightness == Brightness.dark
+                                            ? Colors.white
+                                            : Colors.black),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              if (isSelected)
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 8.0),
+                                  child: Icon(
+                                    Icons.check_circle,
+                                    color: Colors.blue,
+                                    size: 20,
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
                       ),
@@ -110,11 +139,24 @@ class _ThemePickerPanelState extends State<ThemePickerPanel> {
   Widget _buildHeader() {
     return Row(
       children: [
-        Text('Tema & Renkler', style: TextStyle(color: Theme.of(context).textTheme.titleLarge?.color, fontSize: 20, fontWeight: FontWeight.bold)),
+        Text(
+          'Tema & Renkler',
+          style: TextStyle(
+            color: Theme.of(context).textTheme.titleLarge?.color,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         const Spacer(),
         TextButton(
           onPressed: _onDone,
-          child: Text('Bitti', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontSize: 16)),
+          child: Text(
+            'Bitti',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.primary,
+              fontSize: 16,
+            ),
+          ),
         ),
       ],
     );

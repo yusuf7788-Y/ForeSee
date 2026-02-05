@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <!-- Background of the splash screen -->
+        <item name="windowSplashScreenBackground">#000000</item>
+        
+        <!-- Animated or static icon in the center -->
+        <item name="windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        
+        <!-- Icon is displayed for 1000ms by default, but we can manage timing -->
+        <item name="windowSplashScreenAnimationDuration">1000</item>
+        
+        <!-- Theme to switch to after the splash screen is removed -->
+        <item name="postSplashScreenTheme">@style/NormalTheme</item>
+    </style>
+</resources>

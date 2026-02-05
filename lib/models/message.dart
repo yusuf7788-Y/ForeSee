@@ -11,6 +11,8 @@ class Message {
   final Map<String, dynamic>? searchResult;
   final String? audioPath;
   final int? audioDurationMs;
+
+  final bool isReasoning;
   final List<Map<String, dynamic>>? todoPanel;
   final List<Map<String, dynamic>>? actions;
   final bool isChartCandidate;
@@ -31,6 +33,8 @@ class Message {
     required this.timestamp,
     this.imageUrl,
     this.imageUrls,
+
+    this.isReasoning = false,
     this.isStopped = false,
     this.searchResult,
     this.audioPath,
@@ -104,6 +108,10 @@ class Message {
                 : <String, dynamic>{'raw': e.toString()},
           )
           .toList(),
+      alternatives: (json['alternatives'] as List?)
+          ?.map((e) => e.toString())
+          .toList(),
+      displayAlternativeIndex: json['displayAlternativeIndex'] ?? 0,
       metadata: json['metadata'],
       senderUsername: json['senderUsername'],
       senderPhotoUrl: json['senderPhotoUrl'],

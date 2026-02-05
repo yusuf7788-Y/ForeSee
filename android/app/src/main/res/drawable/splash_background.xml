@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splash_color" />
+    
+    <!-- Background Beta Logo -->
+    <item>
+        <bitmap
+            android:gravity="bottom|center_horizontal"
+            android:src="@drawable/betaw"
+            android:tileMode="disabled" />
+    </item>
+
+    <!-- Center Logo with Inset to reduce size -->
+    <item android:top="200dp" android:bottom="200dp" android:left="50dp" android:right="50dp">
+        <bitmap
+            android:gravity="center"
+            android:src="@drawable/logo2w"
+            android:tileMode="disabled" />
+    </item>
+
+    <!-- Footer 'Made by' Logo -->
+    <item android:bottom="40dp">
+        <bitmap
+            android:gravity="bottom|center_horizontal"
+            android:src="@drawable/logo2w"
+            android:tileMode="disabled" />
+    </item>
+</layer-list>

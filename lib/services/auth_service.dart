@@ -197,11 +197,11 @@ class AuthService {
       // For now, we'll use anonymous sign-in as a placeholder
       // In a real implementation, this would verify email/password against Firebase Auth
       final result = await _auth.signInAnonymously();
-      
+
       if (kDebugMode) {
         debugPrint('Email/Password sign-in (mock): ${result.user?.uid}');
       }
-      
+
       return result.user != null;
     } catch (e) {
       if (kDebugMode) {

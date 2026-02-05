@@ -7,7 +7,8 @@ class NotificationService {
   factory NotificationService() => _instance;
   NotificationService._internal();
 
-  final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
   bool _isInitialized = false;
   bool _isTimeZoneInitialized = false;
 
@@ -16,7 +17,9 @@ class NotificationService {
 
     _ensureTimeZoneInitialized();
 
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
     const iosSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -65,7 +68,10 @@ class NotificationService {
     _isTimeZoneInitialized = true;
   }
 
-  Future<void> showContextualSuggestion(String suggestion, String context) async {
+  Future<void> showContextualSuggestion(
+    String suggestion,
+    String context,
+  ) async {
     if (!_isInitialized) {
       await initialize();
     }
@@ -73,7 +79,8 @@ class NotificationService {
     const androidDetails = AndroidNotificationDetails(
       'foresee_contextual_suggestions',
       'Akıllı Öneriler',
-      channelDescription: 'Diğer uygulamaları kullanırken proaktif öneriler sunar.',
+      channelDescription:
+          'Diğer uygulamaları kullanırken proaktif öneriler sunar.',
       importance: Importance.high,
       priority: Priority.high,
       icon: '@mipmap/ic_launcher',
@@ -133,8 +140,8 @@ class NotificationService {
 
     await _notifications.show(
       0,
-      'ForeSee cevap verdi:',
-      firstLine,
+      'ForeSee size cevap verdi: ${firstLine.length > 30 ? '${firstLine.substring(0, 30)}...' : firstLine}',
+      message, // Full message in body (or summary)
       notificationDetails,
     );
   }
@@ -279,6 +286,42 @@ class NotificationService {
     );
   }
 
+  Future<void> showRecoveryNotification(
+    String deviceName,
+    int chatCount,
+  ) async {
+    if (!_isInitialized) {
+      await initialize();
+    }
+
+    const androidDetails = AndroidNotificationDetails(
+      'foresee_account_recovery',
+      'Hesap Kurtarma',
+      channelDescription: 'Eski hesap bulunduğunda bildirim',
+      importance: Importance.high,
+      priority: Priority.high,
+      icon: '@mipmap/ic_launcher',
+    );
+
+    const iosDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const notificationDetails = NotificationDetails(
+      android: androidDetails,
+      iOS: iosDetails,
+    );
+
+    await _notifications.show(
+      2001,
+      'Eski hesabını bulduk!',
+      '$deviceName cihazından $chatCount sohbetli bir yedek bulundu. Geri dönmek için tıklayın.',
+      notificationDetails,
+    );
+  }
+
   Future<void> requestPermissions() async {
     if (!_isInitialized) {
       await initialize();
@@ -286,16 +329,16 @@ class NotificationService {
 
     // Android 13+ için bildirim izni
     await _notifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
         ?.requestNotificationsPermission();
 
     // iOS için bildirim izni
     await _notifications
-        .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(
-          alert: true,
-          badge: true,
-          sound: true,
-        );
+        .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin
+        >()
+        ?.requestPermissions(alert: true, badge: true, sound: true);
   }
 }

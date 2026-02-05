@@ -17,7 +17,18 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
   final StorageService _storageService = StorageService();
   final ShopService _shopService = ShopService();
   final List<String> _symbols = [
-    '🍀', '⭐️', '💎', '⚡️', '🎧', '🎮', '🧠', '🚀', '🌙', '🔥', '💡', '🎲'
+    '🍀',
+    '⭐️',
+    '💎',
+    '⚡️',
+    '🎧',
+    '🎮',
+    '🧠',
+    '🚀',
+    '🌙',
+    '🔥',
+    '💡',
+    '🎲',
   ];
 
   int _rows = 0;
@@ -42,18 +53,27 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
 
   Future<void> _loadCustomizations() async {
     final inventory = await _storageService.loadPlayerInventory();
-    final equippedColorId = inventory.equippedItems[GameId.memoryGame.toString()]?[ItemType.cardColor.toString()];
-    final equippedEmojiId = inventory.equippedItems[GameId.memoryGame.toString()]?[ItemType.emojiSet.toString()];
+    final equippedColorId =
+        inventory.equippedItems[GameId.memoryGame.toString()]?[ItemType
+            .cardColor
+            .toString()];
+    final equippedEmojiId =
+        inventory.equippedItems[GameId.memoryGame.toString()]?[ItemType.emojiSet
+            .toString()];
 
     if (equippedColorId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedColorId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedColorId,
+      );
       if (shopItem.value is Color) {
         _cardColor = shopItem.value;
       }
     }
 
     if (equippedEmojiId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedEmojiId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedEmojiId,
+      );
       if (shopItem.value is List) {
         _emojiSet = List<String>.from(shopItem.value);
       }
@@ -116,7 +136,9 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
 
     final cardSymbols = <String>[];
     for (final s in selected) {
-      cardSymbols..add(s)..add(s);
+      cardSymbols
+        ..add(s)
+        ..add(s);
     }
     cardSymbols.shuffle(rng);
 
@@ -129,6 +151,37 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
       _isChecking = false;
       _cards = List.generate(total, (i) => _MemoryCard(symbol: cardSymbols[i]));
     });
+  }
+
+  /// Çıkış onayı için dialog göster
+  Future<bool> _showExitConfirmation() async {
+    if (_matches == 0) return true; // Hiç eşleşme yoksa direkt çık
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF020617),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Çıkmak istediğine emin misin?',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          'Şu ana kadar $_matches eşleşme yaptın.\nÇıkarsan ilerlemeni kaybedecek ve FsCoin kazanamayacaksın.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('İptal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Çık', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   void _onCardTap(int index) {
@@ -190,7 +243,9 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
     final int coinsEarned = score;
 
     PlayerInventory inventory = await _storageService.loadPlayerInventory();
-    final updatedInventory = inventory.copyWith(fsCoinBalance: inventory.fsCoinBalance + coinsEarned);
+    final updatedInventory = inventory.copyWith(
+      fsCoinBalance: inventory.fsCoinBalance + coinsEarned,
+    );
     await _storageService.savePlayerInventory(updatedInventory);
     await _storageService.savePlayerInventory(inventory);
 
@@ -250,7 +305,11 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
                     child: IconButton(
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                       iconSize: 20,
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: () async {
+                        if (await _showExitConfirmation()) {
+                          Navigator.of(context).pop();
+                        }
+                      },
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -268,10 +327,7 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
                       SizedBox(height: 2),
                       Text(
                         'Masa üzerinde kart eşleştir',
-                        style: TextStyle(
-                          color: Colors.white38,
-                          fontSize: 12,
-                        ),
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                     ],
                   ),
@@ -287,7 +343,10 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
                   ),
                   Text(
                     'Eşleşme: $_matches',
-                    style: const TextStyle(color: Colors.greenAccent, fontSize: 13),
+                    style: const TextStyle(
+                      color: Colors.greenAccent,
+                      fontSize: 13,
+                    ),
                   ),
                 ],
               ),
@@ -297,10 +356,7 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(24),
                     gradient: const LinearGradient(
-                      colors: [
-                        Color(0xFF020617),
-                        Color(0xFF111827),
-                      ],
+                      colors: [Color(0xFF020617), Color(0xFF111827)],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
@@ -309,15 +365,18 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
                   padding: const EdgeInsets.all(12),
                   child: _rows == 0 || _cols == 0
                       ? const Center(
-                          child: CircularProgressIndicator(color: Colors.white70),
+                          child: CircularProgressIndicator(
+                            color: Colors.white70,
+                          ),
                         )
                       : GridView.builder(
-                          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: _cols,
-                            mainAxisSpacing: 8,
-                            crossAxisSpacing: 8,
-                            childAspectRatio: 0.7,
-                          ),
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: _cols,
+                                mainAxisSpacing: 8,
+                                crossAxisSpacing: 8,
+                                childAspectRatio: 0.7,
+                              ),
                           itemCount: _cards.length,
                           itemBuilder: (context, index) {
                             return _buildCard(index);
@@ -363,9 +422,7 @@ class _MemoryGameScreenState extends State<MemoryGameScreen> {
             opacity: isFaceUp ? 1.0 : 0.0,
             child: Text(
               isFaceUp ? card.symbol : '',
-              style: const TextStyle(
-                fontSize: 28,
-              ),
+              style: const TextStyle(fontSize: 28),
             ),
           ),
         ),
@@ -385,11 +442,7 @@ class _MemoryCard {
     this.isMatched = false,
   });
 
-  _MemoryCard copyWith({
-    String? symbol,
-    bool? isRevealed,
-    bool? isMatched,
-  }) {
+  _MemoryCard copyWith({String? symbol, bool? isRevealed, bool? isMatched}) {
     return _MemoryCard(
       symbol: symbol ?? this.symbol,
       isRevealed: isRevealed ?? this.isRevealed,

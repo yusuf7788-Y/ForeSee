@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import './storage_service.dart';
@@ -24,9 +25,11 @@ class ThemeService extends ChangeNotifier {
   Color? _customPrimaryColor;
   final StorageService _storageService = StorageService();
   int _themeIndex = 2; // Varsayılan: Sistem
+  String? _fontFamily;
 
   int get themeIndex => _themeIndex;
   Color? get customPrimaryColor => _customPrimaryColor;
+  String? get fontFamily => _fontFamily;
 
   bool get isDarkMode {
     if (_themeIndex == 2) {
@@ -42,10 +45,11 @@ class ThemeService extends ChangeNotifier {
     if (_themeIndex < 0 || _themeIndex >= themes.length) {
       _themeIndex = 2;
     }
-    
+
     if (_themeIndex == 2) {
       // System theme - return theme with current brightness
-      final platformBrightness = SchedulerBinding.instance.platformDispatcher.platformBrightness;
+      final platformBrightness =
+          SchedulerBinding.instance.platformDispatcher.platformBrightness;
       return AppTheme(
         name: 'Sistem',
         brightness: platformBrightness,
@@ -58,26 +62,36 @@ class ThemeService extends ChangeNotifier {
         primaryColor: const Color(0xFF1976D2),
       );
     }
-    
+
     return themes[_themeIndex];
   }
 
   /// Logo yolu seçici
   String getLogoPath(String original) {
-    if (isDarkMode) return original;
-    switch (original) {
+    // Normalize slashes and remove 'assets/' prefix if present
+    final normalized = original
+        .replaceAll('\\', '/')
+        .replaceFirst('assets/', '');
+
+    // User request: logo2.png in dark, logo2w.png in light
+    // (Existing logic was inverted)
+    if (isDarkMode) {
+      // Dark mode: use original (e.g. logo.png, logo2.png)
+      return 'assets/$normalized';
+    }
+
+    // Light mode: use 'w' versions (white/light logos, e.g. logow.png)
+    switch (normalized) {
       case 'logo.png':
-        return 'logow.png';
+        return 'assets/logow.png';
       case 'logo2.png':
-        return 'logo2w.png';
+        return 'assets/logo2w.png';
       case 'Beta.png':
-        return 'Betaw.png';
       case 'logo3.png':
-        return 'betaw.png';
       case 'logo4.png':
-        return 'betaw.png';
+        return 'assets/Betaw.png';
       default:
-        return original;
+        return 'assets/$normalized';
     }
   }
 
@@ -132,6 +146,7 @@ class ThemeService extends ChangeNotifier {
       await _storageService.setThemeIndex(_themeIndex);
     }
     await _loadCustomColor();
+    _fontFamily = await _storageService.getFontFamily();
   }
 
   Future<void> setThemeIndex(int index, {bool force = false}) async {
@@ -142,6 +157,17 @@ class ThemeService extends ChangeNotifier {
     await _storageService.setThemeIndex(index);
     await _loadCustomColor();
     notifyListeners();
+  }
+
+  Future<void> setFontFamily(String? family) async {
+    _fontFamily = (family == null || family.isEmpty) ? null : family;
+    await _storageService.setFontFamily(_fontFamily ?? '');
+    notifyListeners();
+  }
+
+  Future<void> toggleTheme() async {
+    final newIndex = isDarkMode ? 0 : 1;
+    await setThemeIndex(newIndex);
   }
 
   Future<void> setPrimaryColor(String? colorHex) async {
@@ -193,6 +219,9 @@ class ThemeService extends ChangeNotifier {
       appBarTheme: AppBarTheme(
         backgroundColor: theme.backgroundColor,
         elevation: 0,
+        systemOverlayStyle: theme.brightness == Brightness.dark
+            ? SystemUiOverlayStyle.light
+            : SystemUiOverlayStyle.dark,
         iconTheme: IconThemeData(
           color: theme.brightness == Brightness.dark
               ? Colors.white
@@ -241,7 +270,7 @@ class ThemeService extends ChangeNotifier {
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
       ),
-      fontFamily: 'Roboto',
+      fontFamily: _fontFamily ?? 'Roboto',
     );
   }
 }

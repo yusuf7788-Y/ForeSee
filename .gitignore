@@ -49,3 +49,16 @@ app.*.map.json
 .env.local
 .env.production
 .env.staging
+
+# Sensitive files
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+
+# Temp analysis files
+analysis*.txt
+analiz_sonuc.txt
+analyze_output.txt
+build_log.txt
+debug_sha.txt

@@ -1,12 +1,19 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat.dart';
 import '../models/user_profile.dart';
 import '../models/player_inventory.dart';
+import '../models/chat_folder.dart';
+import 'home_widget_service.dart';
+
+import 'database_service.dart';
 
 class StorageService {
   static const String _chatsKey = 'chats';
   static const String _userProfileKey = 'user_profile';
+  static const String _isSqliteMigratedKey = 'is_sqlite_migrated_v1';
+  // ... existing keys ...
   static const String _currentChatIdKey = 'current_chat_id';
   static const String _userMemoryKey = 'user_memory';
   static const String _customPromptKey = 'custom_prompt';
@@ -29,6 +36,53 @@ class StorageService {
   static const String _lockPromptAiKey = 'lock_prompt_ai';
   static const String _currentInputKey = 'current_input';
   static const String _currentTabKey = 'current_tab';
+  static const String _currentAITitleKey = 'current_ai_title';
+  static const String _aiFontFamilyKey = 'ai_font_family';
+  static const String _userFontFamilyKey = 'user_font_family';
+  static const String _isAutoBackupEnabledKey = 'is_auto_backup_enabled';
+  static const String _hasShownRecoveryPromptKey = 'has_shown_recovery_prompt';
+  static const String _lastAutoBackupTimeKey = 'last_auto_backup_time';
+  static const String _chatFoldersKey = 'chat_folders'; // Klasörler için key
+  static const String _isGmailAiAlwaysAllowedKey = 'is_gmail_ai_always_allowed';
+  static const String _isGithubAiAlwaysAllowedKey =
+      'is_github_ai_always_allowed';
+  static const String _githubAccessTokenKey = 'github_access_token';
+  static const String _elevenLabsVoiceIdKey = 'eleven_labs_voice_id';
+  static const String _isRememberPastChatsEnabledKey =
+      'is_remember_past_chats_enabled';
+  static const String _isGmailConnectedKey = 'is_gmail_connected';
+  static const String _localNotificationsEnabledKey =
+      'local_notifications_enabled';
+  static const String _fcmNotificationsEnabledKey = 'fcm_notifications_enabled';
+
+  Future<bool> getIsGmailConnected() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isGmailConnectedKey) ?? false;
+  }
+
+  Future<void> setIsGmailConnected(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isGmailConnectedKey, value);
+  }
+
+  Future<List<ChatFolder>> loadFolders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jsonStr = prefs.getString(_chatFoldersKey);
+    if (jsonStr == null) return [];
+    try {
+      final List<dynamic> list = jsonDecode(jsonStr);
+      return list.map((e) => ChatFolder.fromJson(e)).toList();
+    } catch (e) {
+      print('Klasör yükleme hatası: $e');
+      return [];
+    }
+  }
+
+  Future<void> saveFolders(List<ChatFolder> folders) async {
+    final prefs = await SharedPreferences.getInstance();
+    final jsonStr = jsonEncode(folders.map((f) => f.toJson()).toList());
+    await prefs.setString(_chatFoldersKey, jsonStr);
+  }
 
   Future<bool> getLockMemoryAi() async {
     final prefs = await SharedPreferences.getInstance();
@@ -50,22 +104,62 @@ class StorageService {
     await prefs.setBool(_lockPromptAiKey, value);
   }
 
-  Future<List<Chat>> loadChats() async {
+  /// Migrates chats from SharedPreferences to SQLite if not already done.
+  Future<void> _migrateToSqliteIfNeeded() async {
     final prefs = await SharedPreferences.getInstance();
-    final chatsJson = prefs.getString(_chatsKey);
+    final isMigrated = prefs.getBool(_isSqliteMigratedKey) ?? false;
 
-    if (chatsJson == null) {
-      return [];
+    if (isMigrated) return;
+
+    final chatsJson = prefs.getString(_chatsKey);
+    if (chatsJson != null) {
+      try {
+        final List<dynamic> chatsList = jsonDecode(chatsJson);
+        final chats = chatsList.map((json) => Chat.fromJson(json)).toList();
+
+        final dbService = DatabaseService();
+        for (var chat in chats) {
+          await dbService.saveChat(chat);
+        }
+
+        // Clear legacy data only after successful migration
+        await prefs.remove(_chatsKey);
+        print('✅ Migration to SQLite successful. ${_chatsKey} cleaned up.');
+      } catch (e) {
+        print('❌ Migration failed: $e');
+        // Do not verify migration if it failed, so we try again next time
+        return;
+      }
     }
 
-    final List<dynamic> chatsList = jsonDecode(chatsJson);
-    return chatsList.map((json) => Chat.fromJson(json)).toList();
+    await prefs.setBool(_isSqliteMigratedKey, true);
+  }
+
+  Future<List<Chat>> loadChats() async {
+    // Ensure migration checks run first
+    await _migrateToSqliteIfNeeded();
+
+    // Load from SQLite
+    return await DatabaseService().getAllChats();
   }
 
   Future<void> saveChats(List<Chat> chats) async {
-    final prefs = await SharedPreferences.getInstance();
-    final chatsJson = jsonEncode(chats.map((c) => c.toJson()).toList());
-    await prefs.setString(_chatsKey, chatsJson);
+    final dbService = DatabaseService();
+    for (var chat in chats) {
+      await dbService.saveChat(chat);
+    }
+
+    HomeWidgetService().updateRecapWidget();
+  }
+
+  Future<void> saveSingleChat(Chat chat) async {
+    await DatabaseService().saveChat(chat);
+    HomeWidgetService().updateRecapWidget();
+  }
+
+  Future<void> deleteChat(String chatId) async {
+    await DatabaseService().deleteChat(chatId);
+    HomeWidgetService().updateRecapWidget();
   }
 
   Future<UserProfile?> loadUserProfile() async {
@@ -152,9 +246,29 @@ class StorageService {
     await prefs.setString(_fontFamilyKey, fontFamily);
   }
 
+  Future<String?> getAiFontFamily() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_aiFontFamilyKey);
+  }
+
+  Future<void> setAiFontFamily(String fontFamily) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_aiFontFamilyKey, fontFamily);
+  }
+
+  Future<String?> getUserFontFamily() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_userFontFamilyKey);
+  }
+
+  Future<void> setUserFontFamily(String fontFamily) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_userFontFamilyKey, fontFamily);
+  }
+
   Future<int> getThemeIndex() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getInt(_themeIndexKey) ?? 0;
+    return prefs.getInt(_themeIndexKey) ?? 2;
   }
 
   Future<void> setThemeIndex(int index) async {
@@ -217,9 +331,53 @@ class StorageService {
     await prefs.setBool(_assistantIntegrationKey, enabled);
   }
 
+  Future<bool> isAutoBackupEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isAutoBackupEnabledKey) ?? true;
+  }
+
+  Future<void> setAutoBackupEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isAutoBackupEnabledKey, enabled);
+  }
+
+  Future<bool> getHasShownRecoveryPrompt() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_hasShownRecoveryPromptKey) ?? false;
+  }
+
+  Future<void> setHasShownRecoveryPrompt(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_hasShownRecoveryPromptKey, value);
+  }
+
+  Future<DateTime?> getLastAutoBackupTime() async {
+    final prefs = await SharedPreferences.getInstance();
+    final iso = prefs.getString(_lastAutoBackupTimeKey);
+    return iso != null ? DateTime.parse(iso) : null;
+  }
+
+  Future<void> setLastAutoBackupTime(DateTime time) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastAutoBackupTimeKey, time.toIso8601String());
+  }
+
   Future<void> resetAll() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
+  }
+
+  Future<void> clearUserProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_userProfileKey);
+  }
+
+  Future<void> resetDataExceptProfile() async {
+    final userProfile = await loadUserProfile();
+    await resetAll();
+    if (userProfile != null) {
+      await saveUserProfile(userProfile);
+    }
   }
 
   // Player Inventory (FsCoin, Skins etc.)
@@ -249,6 +407,9 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     final current = prefs.getInt(_totalCodeLinesKey) ?? 0;
     await prefs.setInt(_totalCodeLinesKey, current + count);
+
+    // Widget'ı güncelle
+    HomeWidgetService().updateStatsWidget();
   }
 
   Future<Map<String, int>> getLanguageUsageStats() async {
@@ -284,7 +445,6 @@ class StorageService {
   Future<void> addUsageMinutes(int minutes) async {
     final prefs = await SharedPreferences.getInstance();
     final stats = await getWeeklyUsageStats();
-    // Key format: YYYY-MM-DD
     final now = DateTime.now();
     final key =
         "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
@@ -292,22 +452,34 @@ class StorageService {
     final current = stats[key] ?? 0;
     stats[key] = current + minutes;
 
-    // 7 günden eski verileri temizle
-    final keysToRemove = <String>[];
-    stats.forEach((k, v) {
-      try {
-        final date = DateTime.parse(k);
-        if (now.difference(date).inDays > 7) {
-          keysToRemove.add(k);
-        }
-      } catch (_) {}
-    });
-    for (final k in keysToRemove) stats.remove(k);
-
     await prefs.setString(_weeklyUsageKey, jsonEncode(stats));
+
+    // Widget'ı güncelle
+    HomeWidgetService().updateStatsWidget();
+  }
+
+  Future<void> addChatUsageMinutes(String chatId, int minutes) async {
+    final chats = await loadChats();
+    final index = chats.indexWhere((c) => c.id == chatId);
+    if (index != -1) {
+      chats[index] = chats[index].copyWith(
+        usageMinutes: chats[index].usageMinutes + minutes,
+      );
+      await saveChats(chats);
+    }
   }
 
   // Input ve Tab yönetimi için yeni metotlar
+  Future<String> getCurrentAITitle() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_currentAITitleKey) ?? '';
+  }
+
+  Future<void> saveCurrentAITitle(String title) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_currentAITitleKey, title);
+  }
+
   Future<String> getCurrentInput() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_currentInputKey) ?? '';
@@ -327,4 +499,138 @@ class StorageService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_currentTabKey, tab);
   }
+
+  static const String _isAutoTitleEnabledKey = 'is_auto_title_enabled';
+
+  Future<bool> getIsAutoTitleEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isAutoTitleEnabledKey) ?? false;
+  }
+
+  Future<void> setIsAutoTitleEnabled(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isAutoTitleEnabledKey, value);
+  }
+
+  Future<bool> getIsGmailAiAlwaysAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isGmailAiAlwaysAllowedKey) ?? false;
+  }
+
+  Future<void> setIsGmailAiAlwaysAllowed(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isGmailAiAlwaysAllowedKey, value);
+  }
+
+  Future<bool> getIsGithubAiAlwaysAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isGithubAiAlwaysAllowedKey) ?? false;
+  }
+
+  Future<void> setIsGithubAiAlwaysAllowed(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isGithubAiAlwaysAllowedKey, value);
+  }
+
+  Future<String?> getGithubAccessToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_githubAccessTokenKey);
+  }
+
+  Future<void> setGithubAccessToken(String? token) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (token == null) {
+      await prefs.remove(_githubAccessTokenKey);
+    } else {
+      await prefs.setString(_githubAccessTokenKey, token);
+    }
+  }
+
+  Future<String?> getElevenLabsVoiceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_elevenLabsVoiceIdKey);
+  }
+
+  Future<void> setElevenLabsVoiceId(String? voiceId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (voiceId == null) {
+      await prefs.remove(_elevenLabsVoiceIdKey);
+    } else {
+      await prefs.setString(_elevenLabsVoiceIdKey, voiceId);
+    }
+  }
+
+  Future<bool> getIsRememberPastChatsEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isRememberPastChatsEnabledKey) ?? false;
+  }
+
+  Future<void> setIsRememberPastChatsEnabled(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isRememberPastChatsEnabledKey, value);
+  }
+
+  Future<bool> getLocalNotificationsEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_localNotificationsEnabledKey) ?? true;
+  }
+
+  Future<void> setLocalNotificationsEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_localNotificationsEnabledKey, enabled);
+  }
+
+  Future<bool> getFcmNotificationsEnabled() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_fcmNotificationsEnabledKey) ?? true;
+  }
+
+  Future<void> setFcmNotificationsEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_fcmNotificationsEnabledKey, enabled);
+  }
+
+  static const String _isOutlookConnectedKey = 'is_outlook_connected';
+  static const String _isOutlookAiAlwaysAllowedKey =
+      'is_outlook_ai_always_allowed';
+  static const String _outlookAccessTokenKey = 'outlook_access_token';
+
+  Future<bool> getIsOutlookConnected() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isOutlookConnectedKey) ?? false;
+  }
+
+  Future<void> setIsOutlookConnected(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isOutlookConnectedKey, value);
+  }
+
+  Future<bool> getIsOutlookAiAlwaysAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_isOutlookAiAlwaysAllowedKey) ?? false;
+  }
+
+  Future<void> setIsOutlookAiAlwaysAllowed(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_isOutlookAiAlwaysAllowedKey, value);
+  }
+
+  Future<String?> getOutlookAccessToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_outlookAccessTokenKey);
+  }
+
+  Future<void> setOutlookAccessToken(String? token) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (token == null) {
+      await prefs.remove(_outlookAccessTokenKey);
+    } else {
+      await prefs.setString(_outlookAccessTokenKey, token);
+    }
+  }
+}
+
+// Top-level function for compute
+String _encodeChats(List<Chat> chats) {
+  return jsonEncode(chats.map((c) => c.toJson()).toList());
 }

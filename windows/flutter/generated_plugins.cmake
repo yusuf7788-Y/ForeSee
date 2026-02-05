@@ -4,11 +4,14 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   app_links
+  audioplayers_windows
   cloud_firestore
   file_selector_windows
   firebase_auth
   firebase_core
+  flutter_secure_storage_windows
   geolocator_windows
+  local_auth_windows
   pasteboard
   permission_handler_windows
   share_plus

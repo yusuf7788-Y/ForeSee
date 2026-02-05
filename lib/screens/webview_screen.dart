@@ -3,14 +3,15 @@ import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/browser_history_service.dart';
 import '../services/private_mode_service.dart';
 import '../services/theme_service.dart';
 import 'package:foresee/screens/search_screen.dart';
 import 'package:foresee/screens/theme_screen.dart';
-import 'package:foresee/screens/bookmarks_screen.dart';
+import 'package:foresee/screens/bookmarks_screen.dart'; // Import kept but unused in menu
 import 'package:foresee/screens/browser_history_screen.dart';
-import 'package:foresee/screens/tabs_screen.dart';
+import 'package:foresee/screens/tabs_screen.dart'; // Import kept but unused in menu
 import 'package:foresee/screens/site_permissions_screen.dart';
 import 'package:foresee/screens/fore_settings_screen.dart';
 import '../widgets/webview_error_screen.dart';
@@ -25,7 +26,8 @@ class ForeWebScreen extends StatefulWidget {
   State<ForeWebScreen> createState() => _ForeWebScreenState();
 }
 
-class _ForeWebScreenState extends State<ForeWebScreen> {
+class _ForeWebScreenState extends State<ForeWebScreen>
+    with WidgetsBindingObserver {
   late final WebViewController _controller;
   bool _isLoading = true;
   bool _isPrivateMode = false;
@@ -35,11 +37,16 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
   WebResourceError? _lastError;
   final ThemeService themeService = ThemeService();
 
+  // 'foresee' | 'light' | 'dark' | 'system'
+  String _browserThemeMode = 'foresee';
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadPrivateMode();
-    _currentTitle = widget.title ?? 'ForeWeb';
+    _loadBrowserTheme();
+    _currentTitle = widget.title ?? 'ForWeb';
     _currentUrl = widget.url;
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -57,7 +64,7 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
                 if (!_isPrivateMode) {
                   BrowserHistoryService.addToHistory(url, title);
                 }
-                
+
                 setState(() {
                   _currentTitle = title;
                   _currentUrl = url;
@@ -80,16 +87,50 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
       ..loadRequest(Uri.parse(widget.url));
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    if (_browserThemeMode == 'system') {
+      setState(() {}); // Sistem teması değişirse güncelle
+    }
+  }
+
+  Future<void> _loadBrowserTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _browserThemeMode = prefs.getString('foreweb_theme_mode') ?? 'foresee';
+      });
+    }
+  }
+
+  // Aktif browser temasının karanlık mod olup olmadığını belirle
+  bool get _isBrowserDarkMode {
+    switch (_browserThemeMode) {
+      case 'light':
+        return false;
+      case 'dark':
+        return true;
+      case 'system':
+        return WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+            Brightness.dark;
+      case 'foresee':
+      default:
+        // ForeSee: Uygulama temasını takip et
+        return themeService.isDarkMode;
+    }
+  }
+
   Future<void> _loadPrivateMode() async {
     final isPrivate = await PrivateModeService.isPrivateModeEnabled();
     if (mounted) {
       setState(() => _isPrivateMode = isPrivate);
     }
-  }
-
-  Future<void> _togglePrivateMode() async {
-    await PrivateModeService.togglePrivateMode();
-    _loadPrivateMode();
   }
 
   Future<void> _shareCurrentPage() async {
@@ -101,9 +142,9 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Paylaşım hatası: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Paylaşım hatası: $e')));
       }
     }
   }
@@ -122,9 +163,9 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Kopyalama hatası: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Kopyalama hatası: $e')));
       }
     }
   }
@@ -133,63 +174,33 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
     try {
       final url = await _controller.currentUrl();
       if (url != null && mounted) {
-        await launchUrl(
-          Uri.parse(url),
-          mode: LaunchMode.externalApplication,
-        );
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Yeni sekme açma hatası: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Yeni sekme açma hatası: $e')));
       }
-    }
-  }
-
-  Future<void> _showSearch() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => SearchScreen(),
-      ),
-    );
-    
-    if (result != null && result.isNotEmpty) {
-      await _controller.loadRequest(Uri.parse(result));
     }
   }
 
   Future<void> _showTheme() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => ThemeScreen(),
-      ),
-    );
-    
-    if (result != null && result.isNotEmpty) {
-      await _controller.loadRequest(Uri.parse(result));
-    }
-  }
+    final result = await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (context) => const ThemeScreen()));
 
-  Future<void> _showBookmarks() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => BookmarksScreen(),
-      ),
-    );
-    
-    if (result != null && result.isNotEmpty) {
-      await _controller.loadRequest(Uri.parse(result));
-    }
+    // Tema ekranından dönüldüğünde her zaman temayı güncelle
+    // 'THEME_CHANGED' dönebilir veya null (eğer back tuşuyla çıkılırsa)
+    // Ama her durumda ayarları yeniden okuyalım
+    await _loadBrowserTheme();
   }
 
   Future<void> _showHistory() async {
     final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => BrowserHistoryScreen(),
-      ),
+      MaterialPageRoute(builder: (context) => BrowserHistoryScreen()),
     );
-    
+
     if (result != null && result.isNotEmpty) {
       await _controller.loadRequest(Uri.parse(result));
     }
@@ -203,54 +214,56 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
     await _controller.reload();
   }
 
+  // Site bilgisi popup'ında da browser temasını kullanacağız
   void _showSiteInfo() {
     final uri = Uri.tryParse(_currentUrl);
     if (uri == null) return;
 
+    final isDark = _isBrowserDarkMode;
+    final bgColor = isDark ? const Color(0xFF1E1E1E) : Colors.white;
+    final textColor = isDark ? Colors.white : Colors.black87;
+    final subtitleColor = isDark ? Colors.white70 : Colors.black54;
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Theme.of(context).colorScheme.surface,
+        backgroundColor: bgColor,
         title: Row(
           children: [
             Image.asset(
-              'foreweb.png',
+              'assets/logo3.png', // Logo path düzeltme (gerekirse dynamic yapılabilir)
               width: 24,
               height: 24,
-              errorBuilder: (context, error, stackTrace) => 
-                Icon(Icons.public, color: Colors.blue, size: 24),
+              errorBuilder: (context, error, stackTrace) =>
+                  Icon(Icons.public, color: Colors.blue, size: 24),
             ),
             const SizedBox(width: 12),
-            Text(
-              'Site Bilgileri',
-              style: TextStyle(
-                color: themeService.isDarkMode ? Colors.white : Theme.of(context).colorScheme.onSurface,
-              ),
-            ),
+            Text('Site Bilgileri', style: TextStyle(color: textColor)),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _buildInfoRow('Başlık:', _currentTitle),
+            _buildInfoRow('Başlık:', _currentTitle, textColor, subtitleColor),
             const SizedBox(height: 8),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: _buildInfoRow('URL:', _currentUrl),
+                  child: _buildInfoRow(
+                    'URL:',
+                    _currentUrl,
+                    textColor,
+                    subtitleColor,
+                  ),
                 ),
                 IconButton(
-                  icon: Icon(
-                    Icons.copy,
-                    color: themeService.isDarkMode ? Colors.white70 : Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                    size: 20,
-                  ),
+                  icon: Icon(Icons.copy, color: subtitleColor, size: 20),
                   onPressed: () {
                     Clipboard.setData(ClipboardData(text: _currentUrl));
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
+                      const SnackBar(
                         content: Text('URL kopyalandı'),
                         backgroundColor: Colors.green,
                       ),
@@ -260,26 +273,29 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
               ],
             ),
             const SizedBox(height: 8),
-            _buildInfoRow('Domain:', uri.host),
+            _buildInfoRow('Domain:', uri.host, textColor, subtitleColor),
             const SizedBox(height: 8),
-            _buildInfoRow('Protokol:', uri.scheme.toUpperCase()),
+            _buildInfoRow(
+              'Protokol:',
+              uri.scheme.toUpperCase(),
+              textColor,
+              subtitleColor,
+            ),
             const SizedBox(height: 8),
-            _buildInfoRow('Güvenlik:', uri.scheme == 'https' ? 'Güvenli 🔒' : 'Güvenli Değil ⚠️'),
+            _buildInfoRow(
+              'Güvenlik:',
+              uri.scheme == 'https' ? 'Güvenli 🔒' : 'Güvenli Değil ⚠️',
+              textColor,
+              subtitleColor,
+            ),
             const SizedBox(height: 16),
             Row(
               children: [
-                Icon(
-                  Icons.security,
-                  color: themeService.isDarkMode ? Colors.white70 : Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                  size: 16,
-                ),
+                Icon(Icons.security, color: subtitleColor, size: 16),
                 const SizedBox(width: 8),
                 Text(
                   'Site İzinleri',
-                  style: TextStyle(
-                    color: themeService.isDarkMode ? Colors.white70 : Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
-                    fontSize: 12,
-                  ),
+                  style: TextStyle(color: subtitleColor, fontSize: 12),
                 ),
                 const Spacer(),
                 TextButton(
@@ -296,10 +312,7 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
                   },
                   child: Text(
                     'Yönet',
-                    style: TextStyle(
-                      color: themeService.isDarkMode ? Colors.blue : Theme.of(context).colorScheme.primary,
-                      fontSize: 12,
-                    ),
+                    style: TextStyle(color: Colors.blue, fontSize: 12),
                   ),
                 ),
               ],
@@ -309,58 +322,58 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text(
-              'Kapat', 
-              style: TextStyle(
-                color: themeService.isDarkMode ? Colors.white : Theme.of(context).colorScheme.primary,
-              ),
-            ),
+            child: Text('Kapat', style: TextStyle(color: Colors.blue)),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
+  Widget _buildInfoRow(
+    String label,
+    String value,
+    Color textColor,
+    Color subtitleColor,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: TextStyle(
-            color: themeService.isDarkMode ? Colors.white70 : Theme.of(context).colorScheme.onSurface.withOpacity(0.7), 
-            fontSize: 12,
-          ),
-        ),
+        Text(label, style: TextStyle(color: subtitleColor, fontSize: 12)),
         const SizedBox(height: 2),
-        Text(
-          value,
-          style: TextStyle(
-            color: themeService.isDarkMode ? Colors.white : Theme.of(context).colorScheme.onSurface,
-            fontSize: 14,
-          ),
-        ),
+        Text(value, style: TextStyle(color: textColor, fontSize: 14)),
       ],
     );
   }
 
+  Future<void> _showForeSettings() async {
+    final result = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (context) => const ForeSettingsScreen()),
+    );
+
+    if (result != null && result.isNotEmpty) {
+      await _controller.loadRequest(Uri.parse(result));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Show error screen if there's an error
-    if (_lastError != null) {
-      return WebViewErrorScreen(
-        error: _lastError!,
-        url: _currentUrl,
-        onRetry: _refreshPage,
-        onOpenInChrome: _openInNewTab,
-      );
-    }
+    // Error screen removed per user request
+
+    final isDark = _isBrowserDarkMode;
+    final backgroundColor = isDark ? const Color(0xFF0A0A0A) : Colors.white;
+    final iconColor = isDark ? Colors.white : Colors.black87;
+    final textColor = isDark ? Colors.white : Colors.black87;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0A),
+      backgroundColor: backgroundColor,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A0A0A),
+        backgroundColor: backgroundColor,
         elevation: 0,
+        // Geri butonu siyah temada beyaz, beyaz temada siyah olmalı
+        leading: IconButton(
+          icon: Icon(Icons.close, color: iconColor), // Çarpı veya geri ikonu
+          onPressed: () => Navigator.pop(context),
+        ),
         title: GestureDetector(
           onLongPress: _showSiteInfo,
           child: Column(
@@ -368,7 +381,10 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
             children: [
               if (_isPrivateMode) ...[
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.orange,
                     borderRadius: BorderRadius.circular(10),
@@ -385,27 +401,28 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
               ],
               Text(
                 _currentTitle,
-                style: const TextStyle(color: Colors.white, fontSize: 14),
+                style: TextStyle(color: textColor, fontSize: 14),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
         ),
-        iconTheme: const IconThemeData(color: Colors.white),
+        iconTheme: IconThemeData(color: iconColor),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.white),
+            icon: Icon(Icons.refresh, color: iconColor),
             onPressed: _refreshPage,
             tooltip: 'Yenile',
           ),
           IconButton(
-            icon: const Icon(Icons.share, color: Colors.white),
+            icon: Icon(Icons.share, color: iconColor),
             onPressed: _shareCurrentPage,
             tooltip: 'Paylaş',
           ),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white),
+            icon: Icon(Icons.more_vert, color: iconColor),
+            color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
             onSelected: (value) async {
               switch (value) {
                 case 'back':
@@ -413,9 +430,6 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
                   break;
                 case 'forward':
                   await _controller.goForward();
-                  break;
-                case 'home':
-                  await _controller.loadRequest(Uri.parse(widget.url));
                   break;
                 case 'copy':
                   await _copyLink();
@@ -429,166 +443,113 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
                 case 'history':
                   _showHistory();
                   break;
-                case 'bookmarks':
-                  _showBookmarks();
-                  break;
-                case 'tabs':
-                  _showTabs();
-                  break;
-                case 'search':
-                  _showSearch();
-                  break;
                 case 'theme':
                   _showTheme();
                   break;
                 case 'foreSettings':
                   _showForeSettings();
                   break;
-                case 'private':
-                  _togglePrivateMode();
-                  break;
               }
             },
-            itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'back',
-                child: Row(
-                  children: [
-                    Icon(Icons.arrow_back, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Geri', style: TextStyle(color: Colors.white)),
-                  ],
+            itemBuilder: (context) {
+              final popupTextColor = isDark ? Colors.white : Colors.black87;
+              return [
+                PopupMenuItem(
+                  value: 'back',
+                  child: Row(
+                    children: [
+                      Icon(Icons.arrow_back, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text('Geri', style: TextStyle(color: popupTextColor)),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'forward',
-                child: Row(
-                  children: [
-                    Icon(Icons.arrow_forward, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('İleri', style: TextStyle(color: Colors.white)),
-                  ],
+                PopupMenuItem(
+                  value: 'forward',
+                  child: Row(
+                    children: [
+                      Icon(Icons.arrow_forward, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text('İleri', style: TextStyle(color: popupTextColor)),
+                    ],
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'home',
-                child: Row(
-                  children: [
-                    Icon(Icons.home, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Ana Sayfa', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'copy',
-                child: Row(
-                  children: [
-                    Icon(Icons.copy, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Link Kopyala', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'newtab',
-                child: Row(
-                  children: [
-                    Icon(Icons.open_in_new, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Chrome\'da Aç', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'history',
-                child: Row(
-                  children: [
-                    Icon(Icons.history, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Geçmiş', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'bookmarks',
-                child: Row(
-                  children: [
-                    Icon(Icons.bookmark, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Yer İmleri', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'tabs',
-                child: Row(
-                  children: [
-                    Icon(Icons.tab, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Sekmeler', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'search',
-                child: Row(
-                  children: [
-                    Icon(Icons.search, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Arama', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'theme',
-                child: Row(
-                  children: [
-                    Icon(Icons.palette, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Temalar', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'info',
-                child: Row(
-                  children: [
-                    Icon(Icons.info, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('Site Bilgisi', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              const PopupMenuItem(
-                value: 'foreSettings',
-                child: Row(
-                  children: [
-                    Icon(Icons.settings, color: Colors.white),
-                    SizedBox(width: 8),
-                    Text('ForeWeb Ayarları', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'private',
-                child: Row(
-                  children: [
-                    Icon(
-                      _isPrivateMode ? Icons.privacy_tip : Icons.public,
-                      color: _isPrivateMode ? Colors.orange : Colors.white,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isPrivateMode ? 'Gizli Mod Kapat' : 'Gizli Mod Aç',
-                      style: TextStyle(
-                        color: _isPrivateMode ? Colors.orange : Colors.white,
+                PopupMenuItem(
+                  value: 'copy',
+                  child: Row(
+                    children: [
+                      Icon(Icons.copy, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Link Kopyala',
+                        style: TextStyle(color: popupTextColor),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                PopupMenuItem(
+                  value: 'newtab',
+                  child: Row(
+                    children: [
+                      Icon(Icons.open_in_new, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Chrome\'da Aç',
+                        style: TextStyle(color: popupTextColor),
+                      ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'history',
+                  child: Row(
+                    children: [
+                      Icon(Icons.history, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text('Geçmiş', style: TextStyle(color: popupTextColor)),
+                    ],
+                  ),
+                ),
+
+                // Kaldırılanlar: Yer İmleri, Sekmeler, Arama, Ana Sayfa, Gizli Mod
+                PopupMenuItem(
+                  value: 'theme',
+                  child: Row(
+                    children: [
+                      Icon(Icons.palette, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text('Temalar', style: TextStyle(color: popupTextColor)),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'info',
+                  child: Row(
+                    children: [
+                      Icon(Icons.info, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Site Bilgisi',
+                        style: TextStyle(color: popupTextColor),
+                      ),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'foreSettings',
+                  child: Row(
+                    children: [
+                      Icon(Icons.settings, color: popupTextColor),
+                      const SizedBox(width: 8),
+                      Text(
+                        'ForWeb Ayarları',
+                        style: TextStyle(color: popupTextColor),
+                      ),
+                    ],
+                  ),
+                ),
+              ];
+            },
           ),
         ],
         bottom: _isLoading
@@ -596,7 +557,7 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
                 preferredSize: const Size.fromHeight(2),
                 child: LinearProgressIndicator(
                   value: _progress,
-                  backgroundColor: Colors.white24,
+                  backgroundColor: isDark ? Colors.white24 : Colors.black12,
                   valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
                 ),
               )
@@ -604,29 +565,5 @@ class _ForeWebScreenState extends State<ForeWebScreen> {
       ),
       body: WebViewWidget(controller: _controller),
     );
-  }
-
-  Future<void> _showTabs() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => const TabsScreen(),
-      ),
-    );
-    
-    if (result != null && result.isNotEmpty) {
-      await _controller.loadRequest(Uri.parse(result));
-    }
-  }
-
-  Future<void> _showForeSettings() async {
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (context) => const ForeSettingsScreen(),
-      ),
-    );
-    
-    if (result != null && result.isNotEmpty) {
-      await _controller.loadRequest(Uri.parse(result));
-    }
   }
 }

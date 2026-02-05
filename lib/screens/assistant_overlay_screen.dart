@@ -54,10 +54,7 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
         _imageBase64 = base64Encode(bytes);
       });
 
-      GreyNotification.show(
-        context,
-        'Ekran görüntüsü eklendi',
-      );
+      GreyNotification.show(context, 'Ekran görüntüsü eklendi');
     } catch (_) {
       GreyNotification.show(context, 'Görsel seçilemedi');
     }
@@ -120,10 +117,15 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
 
     // Web arama komutları: "webde ara ..."
     if (lowerRaw.startsWith('webde ara')) {
-      String query = trimmed.substring(lowerRaw.indexOf('webde ara') + 'webde ara'.length).trim();
+      String query = trimmed
+          .substring(lowerRaw.indexOf('webde ara') + 'webde ara'.length)
+          .trim();
       if (query.isEmpty) {
         if (!mounted) return;
-        GreyNotification.show(context, 'Ne aramamı istersin? Örn: "webde ara dolar kuru"');
+        GreyNotification.show(
+          context,
+          'Ne aramamı istersin? Örn: "webde ara dolar kuru"',
+        );
       } else {
         await _openWebSearch(query);
       }
@@ -152,20 +154,8 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
   }
 
   Future<void> _openAppByName(String rawCommand, String normalized) async {
-    // Önce AI'dan hangi uygulamanın veya web aramasının daha mantıklı olduğunu sor
-    String appHint = 'UNKNOWN';
-    try {
-      appHint = await _openRouterService.refineOverlayAppName(rawCommand);
-    } catch (_) {
-      appHint = 'UNKNOWN';
-    }
-
-    if (appHint == 'WEB_SEARCH') {
-      final refined = await _openRouterService.refineWebSearchQuery(rawCommand);
-      await _openWebSearch(refined);
-      return;
-    }
-
+    // Simplified: Directly try to find matching app without AI preprocessing
+    await _ensureInstalledAppsLoaded();
     await _ensureInstalledAppsLoaded();
     final apps = _installedApps;
     if (apps == null || apps.isEmpty) {
@@ -176,18 +166,24 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
 
     // Komuttan muhtemel uygulama adını çıkar
     final stopWords = <String>{
-      'ac', 'uygulamasini', 'uygulamayi', 'uygulama',
-      'programi', 'program', 'app', 'telefon', 'bana',
-      'su', 'sunu', 'bir', 'lutfen', 'lütfen',
+      'ac',
+      'uygulamasini',
+      'uygulamayi',
+      'uygulama',
+      'programi',
+      'program',
+      'app',
+      'telefon',
+      'bana',
+      'su',
+      'sunu',
+      'bir',
+      'lutfen',
+      'lütfen',
     };
 
-    // Eğer AI bir uygulama adı döndürdüyse, onu baz al; yoksa ham normalized metni kullan
-    String baseText;
-    if (appHint != 'UNKNOWN' && appHint != 'WEB_SEARCH') {
-      baseText = _normalizeCommandText(appHint);
-    } else {
-      baseText = normalized;
-    }
+    // Doğrudan normalized metni kullan
+    String baseText = normalized;
 
     final tokens = baseText
         .split(RegExp(r'\s+'))
@@ -197,7 +193,10 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
 
     if (tokens.isEmpty) {
       if (!mounted) return;
-      GreyNotification.show(context, 'Hangi uygulamayi acmam gerektigini anlayamadim');
+      GreyNotification.show(
+        context,
+        'Hangi uygulamayi acmam gerektigini anlayamadim',
+      );
       return;
     }
 
@@ -216,7 +215,10 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
       } else if (query.contains(appNameNorm)) {
         score = appNameNorm.length * 2;
       } else if (appNameNorm.split(' ').any((p) => query.contains(p))) {
-        score = appNameNorm.split(' ').where((p) => query.contains(p)).fold<int>(0, (s, p) => s + p.length);
+        score = appNameNorm
+            .split(' ')
+            .where((p) => query.contains(p))
+            .fold<int>(0, (s, p) => s + p.length);
       }
 
       if (score > bestScore) {
@@ -283,7 +285,10 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
 
   Future<void> _startVoiceRecording() async {
     if (_isSending) {
-      GreyNotification.show(context, 'AI cevap veriyor, lütfen bitmesini bekleyin...');
+      GreyNotification.show(
+        context,
+        'AI cevap veriyor, lütfen bitmesini bekleyin...',
+      );
       return;
     }
     if (_isRecordingVoice) return;
@@ -345,9 +350,7 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
           Positioned.fill(
             child: GestureDetector(
               onTap: () => Navigator.of(context).pop(),
-              child: Container(
-                color: Colors.black.withOpacity(0.6),
-              ),
+              child: Container(color: Colors.black.withOpacity(0.6)),
             ),
           ),
           SafeArea(
@@ -401,17 +404,11 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
         decoration: BoxDecoration(
           color: Colors.black,
           borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: Colors.white,
-            width: 1.4,
-          ),
+          border: Border.all(color: Colors.white, width: 1.4),
         ),
         child: Text(
           text,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-          ),
+          style: const TextStyle(color: Colors.white, fontSize: 14),
         ),
       ),
     );
@@ -440,9 +437,7 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
             ),
             Expanded(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(
-                  maxHeight: 120,
-                ),
+                constraints: const BoxConstraints(maxHeight: 120),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -455,10 +450,15 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
                       textInputAction: TextInputAction.newline,
                       decoration: const InputDecoration(
                         hintText: "ForeSee'e birşey sor...",
-                        hintStyle: TextStyle(color: Colors.white38, fontSize: 14),
+                        hintStyle: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 14,
+                        ),
                         border: InputBorder.none,
-                        contentPadding:
-                            EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 12,
+                        ),
                       ),
                     ),
                     if (_isRecordingVoice) ...[
@@ -494,7 +494,9 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
                 shape: BoxShape.circle,
               ),
               child: IconButton(
-                onPressed: _isRecordingVoice ? _stopVoiceRecording : _startVoiceRecording,
+                onPressed: _isRecordingVoice
+                    ? _stopVoiceRecording
+                    : _startVoiceRecording,
                 icon: Icon(
                   _isRecordingVoice ? Icons.stop : Icons.mic,
                   size: 18,
@@ -543,18 +545,11 @@ class _AssistantOverlayScreenState extends State<AssistantOverlayScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: const [
-            Icon(
-              Icons.cast,
-              color: Colors.white,
-              size: 18,
-            ),
+            Icon(Icons.cast, color: Colors.white, size: 18),
             SizedBox(width: 8),
             Text(
               'Ekran izleme Kontrol',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-              ),
+              style: TextStyle(color: Colors.white, fontSize: 13),
             ),
           ],
         ),

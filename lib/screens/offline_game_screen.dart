@@ -43,10 +43,15 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
 
   Future<void> _loadCustomizations() async {
     final inventory = await _storageService.loadPlayerInventory();
-    final equippedColorId = inventory.equippedItems[GameId.reflexGame.toString()]?[ItemType.buttonColor.toString()];
+    final equippedColorId =
+        inventory.equippedItems[GameId.reflexGame.toString()]?[ItemType
+            .buttonColor
+            .toString()];
 
     if (equippedColorId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedColorId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedColorId,
+      );
       if (shopItem.value is Color) {
         setState(() {
           _buttonColor = shopItem.value;
@@ -94,6 +99,37 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
     });
   }
 
+  /// Çıkış onayı için dialog göster
+  Future<bool> _showExitConfirmation() async {
+    if (_score == 0) return true; // Skor yoksa direkt çık
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF020617),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Çıkmak istediğine emin misin?',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          'Şu anki skorun: $_score\nÇıkarsan bu skoru kaybedecek ve FsCoin kazanamayacaksın.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('İptal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Çık', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
   void _endGame() async {
     setState(() {
       _timeLeft = 0;
@@ -103,7 +139,9 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
     final int coinsEarned = (_score / 10).round() + _bestCombo;
     if (coinsEarned > 0) {
       PlayerInventory inventory = await _storageService.loadPlayerInventory();
-      final updatedInventory = inventory.copyWith(fsCoinBalance: inventory.fsCoinBalance + coinsEarned);
+      final updatedInventory = inventory.copyWith(
+        fsCoinBalance: inventory.fsCoinBalance + coinsEarned,
+      );
       await _storageService.savePlayerInventory(updatedInventory);
 
       if (mounted) {
@@ -174,7 +212,30 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
                     child: IconButton(
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                       iconSize: 20,
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: () async {
+                        _timer
+                            ?.cancel(); // Geri tuşuna basılınca oyunu duraklat
+                        if (await _showExitConfirmation()) {
+                          Navigator.of(context).pop();
+                        } else {
+                          // Kullanıcı iptal ederse oyun devam etsin
+                          if (_isRunning && _timeLeft > 0) {
+                            _timer = Timer.periodic(
+                              const Duration(seconds: 1),
+                              (t) {
+                                if (_timeLeft <= 1) {
+                                  t.cancel();
+                                  _endGame();
+                                } else {
+                                  setState(() {
+                                    _timeLeft--;
+                                  });
+                                }
+                              },
+                            );
+                          }
+                        }
+                      },
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -192,10 +253,7 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
                       SizedBox(height: 2),
                       Text(
                         'İnternet yokken küçük bir mola',
-                        style: TextStyle(
-                          color: Colors.white38,
-                          fontSize: 12,
-                        ),
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                     ],
                   ),
@@ -203,7 +261,10 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
               ),
               const SizedBox(height: 16),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0xFF111827),
                   borderRadius: BorderRadius.circular(16),
@@ -241,10 +302,7 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(24),
                           gradient: const LinearGradient(
-                            colors: [
-                              Color(0xFF020617),
-                              Color(0xFF0F172A),
-                            ],
+                            colors: [Color(0xFF020617), Color(0xFF0F172A)],
                             begin: Alignment.topLeft,
                             end: Alignment.bottomRight,
                           ),
@@ -253,8 +311,12 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
                         child: Stack(
                           children: [
                             Positioned(
-                              left: _targetPos.dx * constraints.maxWidth - _targetSize / 2,
-                              top: _targetPos.dy * constraints.maxHeight - _targetSize / 2,
+                              left:
+                                  _targetPos.dx * constraints.maxWidth -
+                                  _targetSize / 2,
+                              top:
+                                  _targetPos.dy * constraints.maxHeight -
+                                  _targetSize / 2,
                               child: Container(
                                 width: _targetSize,
                                 height: _targetSize,
@@ -331,7 +393,9 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
                                           backgroundColor: Colors.white,
                                           foregroundColor: Colors.black,
                                           shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(999),
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
                                           ),
                                           padding: const EdgeInsets.symmetric(
                                             horizontal: 20,
@@ -352,7 +416,7 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                'Mavi halkaya dokunarak reflekslerini test edebilirsin.\nİnternet geldiğinde kaldığın yerden devam edebilirsin.',
+                'Halkaya dokunarak reflekslerini test edebilirsin.\nİnternet geldiğinde kaldığın yerden devam edebilirsin.',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: Colors.white54,
                 ),
@@ -375,10 +439,7 @@ class _OfflineGameScreenState extends State<OfflineGameScreen> {
       children: [
         Text(
           label,
-          style: const TextStyle(
-            color: Colors.white38,
-            fontSize: 11,
-          ),
+          style: const TextStyle(color: Colors.white38, fontSize: 11),
         ),
         const SizedBox(height: 2),
         Text(

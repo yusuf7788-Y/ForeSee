@@ -17,9 +17,11 @@ import '../services/firestore_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/monokai-sublime.dart';
+import 'package:flutter_highlight/themes/github.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import '../models/chat.dart';
 import '../models/message.dart';
+// import '../models/chat_note.dart'; // Removed as it's missing
 import '../models/user_profile.dart';
 import '../services/openrouter_service.dart';
 import '../services/storage_service.dart';
@@ -41,9 +43,22 @@ import 'settings_screen.dart';
 import 'chat_summaries_screen.dart';
 import '../widgets/add_to_calendar_panel.dart';
 import 'package:read_pdf_text/read_pdf_text.dart';
+import '../widgets/artifacts_panel.dart';
 import '../services/import_export_service.dart';
 import 'package:share_plus/share_plus.dart';
 import '../services/theme_service.dart';
+import '../services/otp_service.dart';
+import '../services/gmail_service.dart';
+import '../services/github_service.dart';
+import '../services/outlook_service.dart';
+import '../models/chat_folder.dart';
+import 'package:audioplayers/audioplayers.dart';
+import '../services/elevenlabs_service.dart';
+import '../widgets/multi_answer_selection_panel.dart';
+import '../models/lock_type.dart';
+import 'lock_setup_screen.dart';
+import 'lock_verification_screen.dart';
+import '../services/security_service.dart';
 
 final GlobalKey<ChatScreenState> chatScreenKey = GlobalKey<ChatScreenState>();
 
@@ -76,10 +91,14 @@ class _LineRange {
 }
 
 class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
+  ThemeData get theme => Theme.of(context);
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _messageFocusNode = FocusNode();
   final ScrollController _scrollController = ScrollController();
   final OpenRouterService _openRouterService = OpenRouterService();
+  final GmailService _gmailService = GmailService.instance;
+  final GitHubService _githubService = GitHubService.instance;
+  final FirestoreService _firestoreService = FirestoreService.instance;
   final StorageService _storageService = StorageService();
   final SearchService _searchService = SearchService();
   final ImageGenerationService _imageGenService = ImageGenerationService();
@@ -114,7 +133,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _isThinkingMode = false;
   String _agentThinking = ''; // AI'ın düşünme süreci
   String _agentTerminal = ''; // Agent terminal çıktıları
-  String _loadingMessage = 'Düşünüyor...';
+  String? _loadingMessage;
   String? _activeResponseChatId; // AI cevap verirken hangi chat'e cevap veriyor
   bool _shouldStopResponse = false; // AI cevabını durdurmak için flag
   String _currentTypingText = ''; // Şu anda yazılan metin
@@ -126,21 +145,49 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _notificationsEnabled = true;
   int _fontSizeIndex = 2;
   String? _fontFamily;
+  final ValueNotifier<String> _streamingContent = ValueNotifier<String>('');
   bool _showSuggestions = false;
   bool _isMultiDeleteMode = false;
   final Set<String> _selectedChatIdsForDelete = {};
+  bool _isAutoTitleEnabled = false;
   bool _isRecordingVoice = false;
+  bool _isManualRecording = false; // Basılı tutma modu için
   double _recordLevel = 0.0;
   String _lastVoiceText = '';
   Timer? _silenceTimer;
   StreamSubscription? _contextSubscription;
   bool _isSmartContextEnabled = false;
-  File? _pickedPdfFile;
-  String? _pickedPdfText;
+  final List<File> _pickedPdfFiles = [];
+  final List<String> _pickedPdfBase64List = [];
+  bool _isRememberPastChatsEnabled = false;
+  bool _isGmailAiAlwaysAllowed = false;
+  bool _isGithubAiAlwaysAllowed = false;
+  bool _isOutlookAiAlwaysAllowed = false;
+  bool _isArtifactsPanelOpen = false;
+  String _artifactContent = '';
+  String _artifactTitle = '';
+  String _artifactLanguage = 'text';
   bool _isTodoPanelOpen = false;
   List<Map<String, dynamic>> _currentTodoTasks = [];
+  List<ChatFolder> _folders = [];
+  List<String> _currentMultiAnswers = [];
+  bool _isMultiAnswerPanelOpen = false;
+  String? _multiAnswerTargetMessageId;
+  String? _multiAnswerTargetChatId;
+  bool _isChatNotesPanelOpen =
+      false; // Added as it was missing from state but used in build
+
+  // Audio State
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  String? _playingMessageId;
+  bool _isAudioLoading = false;
+  bool _isAudioBarVisible = false;
+  Duration _audioDuration = Duration.zero;
+  Duration _audioPosition = Duration.zero;
   bool _isExporting = false;
   String? _exportLoadingMessage;
+  bool _isSecretMode = false;
+  bool _isGeneratingImage = false;
 
   StreamSubscription? _intentDataStreamSubscription;
   StreamSubscription? _intentDataStreamSubscriptionMedia;
@@ -161,6 +208,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     super.initState();
     _loadData();
     _scrollController.addListener(_onScroll);
+    // Initial auto-scroll
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
     _messageController.addListener(_onMessageTextChanged);
     WidgetsBinding.instance.addObserver(this);
     _initShareIntentListener();
@@ -168,29 +217,31 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _requestPermissions();
     _initContextListener();
     _loadInitialSettings();
-  }
 
-  Future<void> _openChatSummaries(Chat chat) async {
-    final result = await Navigator.of(context).push<Chat>(
-      MaterialPageRoute(builder: (ctx) => ChatSummariesScreen(chat: chat)),
-    );
-
-    if (!mounted || result == null) return;
-
-    setState(() {
-      final index = _chats.indexWhere((c) => c.id == result.id);
-      if (index != -1) {
-        _chats[index] = result;
-      }
-      if (_currentChat?.id == result.id) {
-        _currentChat = result;
+    _audioPlayer.onPlayerComplete.listen((event) {
+      if (mounted) {
+        setState(() {
+          _playingMessageId = null;
+          _isAudioBarVisible =
+              false; // Close bar on complete? User said "durdurma butonu soldadir", maybe pause?
+          // User said "kapatmak için sağ üstte x". So on complete we might just reset or stop.
+          // Let's stop and hide for now.
+          _audioPosition = Duration.zero;
+        });
       }
     });
 
-    await _storageService.saveChats(_chats);
+    _audioPlayer.onDurationChanged.listen((d) {
+      setState(() => _audioDuration = d);
+    });
+
+    _audioPlayer.onPositionChanged.listen((p) {
+      setState(() => _audioPosition = p);
+    });
   }
 
   Future<void> _openTrash() async {
+    final theme = Theme.of(context);
     final now = DateTime.now();
     final trashedChats =
         _chats
@@ -209,165 +260,253 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     await showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       isScrollControlled: true,
       builder: (ctx) {
-        return SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final currentTrashed =
+                _chats
+                    .where(
+                      (c) =>
+                          c.deletedAt != null &&
+                          now.difference(c.deletedAt!).inDays < 7,
+                    )
+                    .toList()
+                  ..sort((a, b) => b.deletedAt!.compareTo(a.deletedAt!));
+
+            if (currentTrashed.isEmpty) {
+              return Container(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.delete_sweep_outlined,
+                      size: 48,
+                      color: theme.disabledColor,
                     ),
-                  ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Çöp kutusu boşaldı',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 16),
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Kapat'),
+                    ),
+                  ],
                 ),
-                const Text(
-                  'Çöp kutusu',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Sohbetler burada 7 gün boyunca tutulur. İstersen kalıcı olarak silebilir veya geri yükleyebilirsin.',
-                  style: TextStyle(color: Colors.white60, fontSize: 13),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 260,
-                  child: ListView.builder(
-                    itemCount: trashedChats.length,
-                    itemBuilder: (context, index) {
-                      final chat = trashedChats[index];
-                      final deletedAt = chat.deletedAt!;
-                      final remaining =
-                          const Duration(days: 7) - now.difference(deletedAt);
-                      final remainingDays = remaining.inDays.clamp(0, 7);
-                      return Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
+              );
+            }
+
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        margin: const EdgeInsets.only(bottom: 12),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF222222),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: Colors.white10),
+                          color: themeService.isDarkMode
+                              ? Colors.white24
+                              : Colors.black12,
+                          borderRadius: BorderRadius.circular(2),
                         ),
-                        child: ListTile(
-                          dense: true,
-                          title: Text(
-                            chat.title,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            'Silinme: ${DateFormat('dd.MM.yyyy HH:mm').format(deletedAt)}  ·  Kalan: ${remainingDays}gün',
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 11,
-                            ),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                tooltip: 'Geri yükle',
-                                icon: const Icon(
-                                  Icons.restore,
-                                  color: Colors.white70,
-                                  size: 20,
-                                ),
-                                onPressed: () async {
-                                  setState(() {
-                                    final index = _chats.indexWhere(
-                                      (c) => c.id == chat.id,
-                                    );
-                                    if (index != -1) {
-                                      _chats[index] = _chats[index].copyWith(
-                                        deletedAt: null,
-                                      );
-                                    }
-                                  });
-                                  await _storageService.saveChats(_chats);
-                                  if (!mounted) return;
-                                  Navigator.of(ctx).pop();
-                                },
-                              ),
-                              IconButton(
-                                tooltip: 'Kalıcı sil',
-                                icon: const Icon(
-                                  Icons.delete_forever,
-                                  color: Colors.redAccent,
-                                  size: 20,
-                                ),
-                                onPressed: () async {
-                                  setState(() {
-                                    _chats.removeWhere((c) => c.id == chat.id);
-                                    if (_currentChat?.id == chat.id) {
-                                      _currentChat = null;
-                                    }
-                                  });
-                                  await _storageService.saveChats(_chats);
-                                  if (!mounted) return;
-                                  Navigator.of(ctx).pop();
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: TextButton(
-                    onPressed: () async {
-                      setState(() {
-                        _chats.removeWhere(
-                          (c) =>
-                              c.deletedAt != null &&
-                              now.difference(c.deletedAt!).inDays < 7,
-                        );
-                        if (_currentChat != null &&
-                            _currentChat!.deletedAt != null) {
-                          _currentChat = null;
-                        }
-                      });
-                      await _storageService.saveChats(_chats);
-                      if (!mounted) return;
-                      Navigator.of(ctx).pop();
-                    },
-                    child: const Text(
-                      'Tümünü kalıcı sil',
-                      style: TextStyle(
-                        color: Colors.redAccent,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Çöp kutusu',
+                          style: TextStyle(
+                            color: Theme.of(context).textTheme.bodyLarge?.color,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          '${currentTrashed.length} sohbet',
+                          style: TextStyle(
+                            color: theme.disabledColor,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Sohbetler 7 gün sonra kalıcı olarak silinir.',
+                      style: TextStyle(
+                        color: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.color?.withOpacity(0.7),
+                        fontSize: 13,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.4,
+                      child: ListView.builder(
+                        itemCount: currentTrashed.length,
+                        itemBuilder: (context, index) {
+                          final chat = currentTrashed[index];
+                          final deletedAt = chat.deletedAt!;
+                          final remaining =
+                              const Duration(days: 7) -
+                              now.difference(deletedAt);
+                          final remainingDays = remaining.inDays.clamp(0, 7);
+                          return Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            decoration: BoxDecoration(
+                              color: themeService.isDarkMode
+                                  ? const Color(0xFF222222)
+                                  : Colors.grey.shade100,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Theme.of(
+                                  context,
+                                ).dividerColor.withOpacity(0.1),
+                              ),
+                            ),
+                            child: ListTile(
+                              dense: true,
+                              title: Text(
+                                chat.title,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).textTheme.bodyLarge?.color,
+                                  fontSize: 14,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                'Kalan: $remainingDays gün',
+                                style: TextStyle(
+                                  color: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.color
+                                      ?.withOpacity(0.5),
+                                  fontSize: 11,
+                                ),
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Geri yükle',
+                                    icon: const Icon(
+                                      Icons.restore,
+                                      color: Colors.greenAccent,
+                                      size: 20,
+                                    ),
+                                    onPressed: () async {
+                                      setState(() {
+                                        final idx = _chats.indexWhere(
+                                          (c) => c.id == chat.id,
+                                        );
+                                        if (idx != -1) {
+                                          _chats[idx] = _chats[idx].copyWith(
+                                            clearDeletedAt: true,
+                                          );
+                                        }
+                                      });
+                                      setModalState(
+                                        () {},
+                                      ); // Modal içini güncelle
+                                      await _storageService.saveChats(_chats);
+                                    },
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Kalıcı sil',
+                                    icon: const Icon(
+                                      Icons.delete_forever,
+                                      color: Colors.redAccent,
+                                      size: 20,
+                                    ),
+                                    onPressed: () async {
+                                      setState(() {
+                                        _chats.removeWhere(
+                                          (c) => c.id == chat.id,
+                                        );
+                                        if (_currentChat?.id == chat.id)
+                                          _currentChat = null;
+                                      });
+                                      setModalState(() {});
+                                      await _storageService.saveChats(_chats);
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: context,
+                            builder: (c) => AlertDialog(
+                              title: const Text('Emin misiniz?'),
+                              content: const Text(
+                                'Tüm sohbetler kalıcı olarak silinecek.',
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(c, false),
+                                  child: const Text('İptal'),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.pop(c, true),
+                                  child: const Text(
+                                    'Sil',
+                                    style: TextStyle(color: Colors.redAccent),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (confirm != true) return;
+
+                          setState(() {
+                            _chats.removeWhere((c) => c.deletedAt != null);
+                            if (_currentChat != null &&
+                                _currentChat!.deletedAt != null)
+                              _currentChat = null;
+                          });
+                          await _storageService.saveChats(_chats);
+                          if (!mounted) return;
+                          Navigator.of(ctx).pop();
+                        },
+                        child: const Text(
+                          'Tümünü Temizle',
+                          style: TextStyle(color: Colors.redAccent),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -476,6 +615,25 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
 
     return _LineRange(startLine, endLine);
+  }
+
+  void _openArtifactPanel(
+    String code,
+    String language,
+    String title,
+    bool isPreview,
+  ) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.8),
+      builder: (context) => ArtifactsPanel(
+        content: code,
+        title: title,
+        language: language,
+        initialTab: isPreview ? 1 : 0,
+        onClose: () => Navigator.of(context).pop(),
+      ),
+    );
   }
 
   void _handleCodeReferenceGenerated(String reference) {
@@ -610,13 +768,23 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               );
             }
 
+            final isDark = themeService.isDarkMode;
             final theme = Theme.of(ctx);
 
             return Container(
               height: size.height * 0.9,
-              decoration: const BoxDecoration(
-                color: Color(0xFF0F0F0F),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF0F0F0F) : Colors.white,
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(24),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.2),
+                    blurRadius: 15,
+                    spreadRadius: 5,
+                  ),
+                ],
               ),
               child: SafeArea(
                 top: true,
@@ -626,8 +794,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     // Header with Save Button
                     Padding(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
+                        horizontal: 16,
+                        vertical: 8,
                       ),
                       child: Row(
                         children: [
@@ -643,23 +811,25 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               style: TextStyle(
                                 color: Colors.blueAccent,
                                 fontSize: 13,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
                           ),
                           const Spacer(),
-                          const Text(
-                            'Kod analizi',
+                          Text(
+                            'Kod Analizi',
                             style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                              color: isDark ? Colors.white : Colors.black87,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
                             ),
                           ),
                           const Spacer(),
                           IconButton(
-                            icon: const Icon(
+                            icon: Icon(
                               Icons.close,
-                              color: Colors.white54,
+                              color: isDark ? Colors.white54 : Colors.black54,
+                              size: 20,
                             ),
                             onPressed: () {
                               Navigator.of(sheetContext).pop();
@@ -668,7 +838,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         ],
                       ),
                     ),
-                    Divider(height: 1, color: themeService.isDarkMode ? Colors.white12 : Colors.black12),
+                    Divider(
+                      height: 1,
+                      color: isDark
+                          ? Colors.white10
+                          : Colors.black.withOpacity(0.05),
+                    ),
                     Expanded(
                       child: Stack(
                         children: [
@@ -691,11 +866,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                         });
                                       },
                                     ),
-                                    const Text(
-                                      'Orijinal kod',
+                                    Text(
+                                      'Orijinal Kod',
                                       style: TextStyle(
-                                        color: Colors.white70,
+                                        color: isDark
+                                            ? Colors.white70
+                                            : Colors.black54,
                                         fontSize: 12,
+                                        fontWeight: FontWeight.w600,
                                       ),
                                     ),
                                   ],
@@ -703,20 +881,28 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                 Container(
                                   width: double.infinity,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF161616),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: Colors.white10),
+                                    color: isDark
+                                        ? const Color(0xFF161616)
+                                        : const Color(0xFFF8F9FA),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: isDark
+                                          ? Colors.white10
+                                          : Colors.black.withOpacity(0.05),
+                                    ),
                                   ),
-                                  padding: const EdgeInsets.all(12),
+                                  padding: const EdgeInsets.all(16),
                                   child: HighlightView(
                                     code,
                                     language: language.isEmpty
                                         ? 'text'
                                         : language.toLowerCase(),
-                                    theme: monokaiSublimeTheme,
+                                    theme: isDark
+                                        ? monokaiSublimeTheme
+                                        : githubTheme,
                                     textStyle: const TextStyle(
                                       fontFamily: 'monospace',
-                                      fontSize: 11,
+                                      fontSize: 12,
                                     ),
                                   ),
                                 ),
@@ -742,10 +928,13 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                             },
                                           ),
                                           Text(
-                                            'Önerilen kod ${index + 1}',
-                                            style: const TextStyle(
-                                              color: Colors.white70,
+                                            'Önerilen Kod ${index + 1}',
+                                            style: TextStyle(
+                                              color: isDark
+                                                  ? Colors.white70
+                                                  : Colors.black54,
                                               fontSize: 12,
+                                              fontWeight: FontWeight.w600,
                                             ),
                                           ),
                                         ],
@@ -756,29 +945,39 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                           bottom: 16,
                                         ),
                                         decoration: BoxDecoration(
-                                          color: const Color(0xFF161616),
+                                          color: isDark
+                                              ? const Color(0xFF161616)
+                                              : const Color(0xFFF8F9FA),
                                           borderRadius: BorderRadius.circular(
-                                            12,
+                                            16,
                                           ),
                                           border: Border.all(
-                                            color: Colors.white10,
+                                            color: isDark
+                                                ? Colors.white10
+                                                : Colors.black.withOpacity(
+                                                    0.05,
+                                                  ),
                                           ),
                                         ),
-                                        padding: const EdgeInsets.all(12),
+                                        padding: const EdgeInsets.all(16),
                                         child: sugg.isEmpty
-                                            ? const Text(
+                                            ? Text(
                                                 'Analiz ediliyor...',
                                                 style: TextStyle(
-                                                  color: Colors.white38,
+                                                  color: isDark
+                                                      ? Colors.white38
+                                                      : Colors.black38,
                                                   fontSize: 11,
                                                 ),
                                               )
                                             : SelectableText(
                                                 sugg,
-                                                style: const TextStyle(
-                                                  color: Colors.white,
+                                                style: TextStyle(
+                                                  color: isDark
+                                                      ? Colors.white
+                                                      : Colors.black87,
                                                   fontFamily: 'monospace',
-                                                  fontSize: 11,
+                                                  fontSize: 12,
                                                 ),
                                               ),
                                       ),
@@ -797,10 +996,13 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               right: 20,
                               child: FloatingActionButton.small(
                                 heroTag: 'scroll_down_code',
-                                backgroundColor: const Color(0xFF2A2A2A),
-                                child: const Icon(
+                                backgroundColor: isDark
+                                    ? const Color(0xFF2A2A2A)
+                                    : Colors.white,
+                                elevation: 4,
+                                child: Icon(
                                   Icons.keyboard_arrow_down,
-                                  color: Colors.white,
+                                  color: isDark ? Colors.white : Colors.black87,
                                 ),
                                 onPressed: () {
                                   panelScrollController.animateTo(
@@ -823,26 +1025,30 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
                       child: SizedBox(
                         width: double.infinity,
-                        height: 48,
+                        height: 52,
                         child: ElevatedButton.icon(
                           onPressed: isLoading || suggestions.length >= 3
                               ? null
                               : runAnalysis,
-                          icon: const Icon(Icons.auto_fix_high, size: 18),
+                          icon: const Icon(Icons.auto_fix_high, size: 20),
                           label: Text(
                             isLoading
                                 ? 'Analiz ediliyor...'
                                 : (suggestions.length >= 3
                                       ? 'Maksimum analiz sayısına ulaşıldı'
-                                      : 'Yeni analiz başlat'),
+                                      : 'Yeni Analiz Başlat'),
+                            style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF2563EB),
-                            disabledBackgroundColor: Colors.white10,
+                            disabledBackgroundColor: isDark
+                                ? Colors.white10
+                                : Colors.black.withOpacity(0.05),
                             foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                              borderRadius: BorderRadius.circular(16),
                             ),
+                            elevation: 0,
                           ),
                         ),
                       ),
@@ -956,7 +1162,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             if (textItems.isNotEmpty) {
               final combinedText = textItems
                   .map((m) => m.path)
-                  .where((path) => path.isNotEmpty)
+                  .where(
+                    (path) => path.isNotEmpty && !path.startsWith('foresee://'),
+                  )
                   .join('\n');
               if (combinedText.isNotEmpty) {
                 _handleSharedText(combinedText);
@@ -999,7 +1207,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (textItems.isNotEmpty) {
         final combinedText = textItems
             .map((m) => m.path)
-            .where((path) => path.isNotEmpty)
+            .where((path) => path.isNotEmpty && !path.startsWith('foresee://'))
             .join('\n');
         if (combinedText.isNotEmpty) {
           _handleSharedText(combinedText);
@@ -1166,55 +1374,203 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ((_currentChat?.messages.isEmpty ?? true) &&
                 _ephemeralMessages.isEmpty)) &&
         !_showMentionPanel;
+
     return WillPopScope(
       onWillPop: _onWillPop,
       child: Scaffold(
         key: _scaffoldKey,
-        resizeToAvoidBottomInset: true, // Klavye açılınca otomatik küçült
-        backgroundColor: theme.scaffoldBackgroundColor,
-        drawer: _userProfile != null ? Sidebar(
-          chats: _chats,
-          currentChat: _currentChat,
-          userProfile: _userProfile!,
-          onChatSelected: _handleChatSelected,
-          onNewChat: _createNewChat,
-          onProfileUpdated: _handleProfileUpdated,
-          onChatDelete: _handleChatDelete,
-          onChatEdit: _handleChatEdit,
-          onSettingsPressed: _openSettings,
-          onSearchChats: _openChatSearch,
-          isMultiDeleteMode: _isMultiDeleteMode,
-          selectedChatIdsForDelete: _selectedChatIdsForDelete,
-          onMultiDeletePressed: _handleMultiDeletePressed,
-          onChatToggleSelection: _handleChatToggleSelection,
-          onMultiDeleteCancel: _handleMultiDeleteCancel,
-          onSignOut: _handleSignOut,
-          onOpenTrash: _openTrash,
-          onChatTogglePin: _togglePinChat,
-          onOpenChatSummaries: _openChatSummaries,
-          onImportChat: _handleFsImport,
-          onExportPdf: _handlePdfExport,
-          onExportFs: _handleFsExport,
-        ) : null,
+        resizeToAvoidBottomInset: true,
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        drawer: _userProfile != null
+            ? Sidebar(
+                chats: _chats,
+                currentChat: _currentChat,
+                userProfile: _userProfile!,
+                onChatSelected: _handleChatSelected,
+                onNewChat: _createNewChat,
+                onProfileUpdated: _handleProfileUpdated,
+                onChatDelete: _handleChatDelete,
+                onChatEdit: _handleChatEdit,
+                onSettingsPressed: _openSettings,
+                onSearchChats: _openChatSearch,
+                isMultiDeleteMode: _isMultiDeleteMode,
+                selectedChatIdsForDelete: _selectedChatIdsForDelete,
+                onMultiDeletePressed: _handleMultiDeletePressed,
+                onChatToggleSelection: _handleChatToggleSelection,
+                onMultiDeleteCancel: _handleMultiDeleteCancel,
+                onSignOut: _handleSignOut,
+                onOpenTrash: _openTrash,
+                onChatTogglePin: _togglePinChat,
+                onOpenChatSummaries: _openChatSummaries,
+                onImportChat: _handleFsImport,
+                onExportPdf: _handlePdfExport,
+                onExportFs: _handleFsExport,
+
+                folders: _folders,
+                onChatMoveToFolder: _handleChatMoveToFolder,
+                onCreateFolder: _handleCreateFolder,
+                onEditFolder: _handleEditFolder,
+                onDeleteFolder: _handleDeleteFolder,
+                onToggleFolder: _handleToggleFolder,
+                onToggleFolderPin: _handleToggleFolderPin,
+                onChatLock: _handleChatLock,
+              )
+            : null,
         body: SafeArea(
-          child: Stack(
-            children: [
-              Column(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final bool isWide = constraints.maxWidth >= 800;
+              return Stack(
                 children: [
-                  _buildHeader(),
-                  Expanded(
-                    child: showEmptyState
-                        ? _buildEmptyState()
-                        : _buildMessageList(),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          children: [
+                            _buildHeader(),
+                            Expanded(
+                              child: showEmptyState
+                                  ? _buildEmptyState()
+                                  : _buildMessageList(),
+                            ),
+                            if (_showMentionPanel) _buildMentionPanel(),
+                            _buildInputArea(),
+                          ],
+                        ),
+                      ),
+                      /* 
+                      if (_isChatNotesPanelOpen && isWide)
+                        SizedBox(
+                          width: 400,
+                          child: ChatNotesPanel(
+                            chat: _currentChat!,
+                            onNoteEdited: _handleNoteEdited,
+                            onNoteDeleted: _handleNoteDeleted,
+                            onNotePinned: _handleNotePinned,
+                            onReviewRequested: _handleNotesReviewRequested,
+                            onExportRequested: _handleNotesExportRequested,
+                            onSaveRequested: _handleNotesSaveRequested,
+                            onUndoRequested: _handleNotesUndoRequested,
+                            onRedoRequested: _handleNotesRedoRequested,
+                            onOptionSelected: _handleNoteOptionSelected,
+                            onAiCorrectRequested: _handleNoteAiCorrectRequested,
+                            onInfiniteNoteChanged: _handleInfiniteNoteChanged,
+                          ),
+                        ),
+                      */
+                      if (_isArtifactsPanelOpen && isWide)
+                        SizedBox(
+                          width: 400,
+                          child: ArtifactsPanel(
+                            content: _artifactContent,
+                            title: _artifactTitle,
+                            language: _artifactLanguage,
+                            onClose: () =>
+                                setState(() => _isArtifactsPanelOpen = false),
+                          ),
+                        ),
+                    ],
                   ),
-                  if (_showMentionPanel) _buildMentionPanel(),
-                  _buildInputArea(),
+                  if (_isArtifactsPanelOpen && !isWide)
+                    Positioned(
+                      top: 0,
+                      bottom: 0,
+                      right: 0,
+                      left: constraints.maxWidth > 600
+                          ? constraints.maxWidth - 450
+                          : 0,
+                      child: ArtifactsPanel(
+                        content: _artifactContent,
+                        title: _artifactTitle,
+                        language: _artifactLanguage,
+                        onClose: () =>
+                            setState(() => _isArtifactsPanelOpen = false),
+                      ),
+                    ),
+                  _buildAudioOverlay(),
+                  if (_isExporting) _buildExportOverlay(),
+                  const SizedBox(height: 16), // Extra safe space
+                  // Invisible Anchor
+                  SizedBox(
+                    height: 1,
+                    key: ValueKey('bottom-anchor-(${_currentChat?.id})'),
+                  ),
+                  if (_isMultiAnswerPanelOpen)
+                    Positioned.fill(
+                      child: MultiAnswerSelectionPanel(
+                        answers: _currentMultiAnswers,
+                        onAnswerSelected: (index) {
+                          final msg = Message(
+                            id: _multiAnswerTargetMessageId!,
+                            chatId: _multiAnswerTargetChatId!,
+                            content: _currentMultiAnswers[index],
+                            isUser: false,
+                            timestamp: DateTime.now(),
+                            alternatives: _currentMultiAnswers,
+                          );
+                          _handleAlternativeSelected(msg, index);
+                          setState(() => _isMultiAnswerPanelOpen = false);
+                        },
+                        onDismiss: () =>
+                            setState(() => _isMultiAnswerPanelOpen = false),
+                      ),
+                    ),
                 ],
-              ),
-              if (_isExporting) _buildExportOverlay(),
-            ],
+              );
+            },
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildTypingIndicator() {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: themeService.isDarkMode
+                  ? const Color(0xFF1E1E1E)
+                  : Colors.grey.shade200,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(16),
+                topRight: Radius.circular(16),
+                bottomRight: Radius.circular(16),
+                bottomLeft: Radius.circular(4),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      theme.colorScheme.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _currentTypingText.isNotEmpty
+                      ? _currentTypingText
+                      : 'Yazıyor...',
+                  style: TextStyle(
+                    color: theme.textTheme.bodyMedium?.color?.withOpacity(0.7),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1484,7 +1840,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -1544,7 +1900,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       height: 4,
                       margin: const EdgeInsets.only(bottom: 12),
                       decoration: BoxDecoration(
-                        color: Colors.white24,
+                        color: Theme.of(context).dividerColor.withOpacity(0.3),
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
@@ -1552,17 +1908,27 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   TextField(
                     controller: searchController,
                     autofocus: true,
-                    style: const TextStyle(color: Colors.white),
+                    style: TextStyle(
+                      color: Theme.of(context).textTheme.bodyLarge?.color,
+                    ),
                     decoration: InputDecoration(
                       hintText: 'Sohbet başlığında ara...',
-                      hintStyle: const TextStyle(color: Colors.white54),
-                      prefixIcon: const Icon(
+                      hintStyle: TextStyle(
+                        color: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.color?.withOpacity(0.5),
+                      ),
+                      prefixIcon: Icon(
                         Icons.search,
-                        color: Colors.white54,
-                        size: 18,
+                        color: Theme.of(
+                          context,
+                        ).iconTheme.color?.withOpacity(0.5),
+                        size: 20,
                       ),
                       filled: true,
-                      fillColor: const Color(0xFF2A2A2A),
+                      fillColor: Theme.of(
+                        context,
+                      ).colorScheme.onSurface.withOpacity(0.05),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide.none,
@@ -1573,9 +1939,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   const SizedBox(height: 12),
                   if (filteredChats.isEmpty &&
                       searchController.text.trim().isNotEmpty)
-                    const Text(
+                    Text(
                       'Sohbet bulunamadı',
-                      style: TextStyle(color: Colors.white60, fontSize: 13),
+                      style: TextStyle(
+                        color: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.color?.withOpacity(0.6),
+                        fontSize: 13,
+                      ),
                     )
                   else
                     SizedBox(
@@ -1594,8 +1965,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               chat.title.isEmpty
                                   ? 'İsimsiz sohbet'
                                   : chat.title,
-                              style: const TextStyle(
-                                color: Colors.white,
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).textTheme.bodyLarge?.color,
                                 fontSize: 14,
                               ),
                               maxLines: 1,
@@ -1691,7 +2064,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             child: IconButton(
               icon: Icon(
                 Icons.menu,
-                color: theme.brightness == Brightness.dark
+                color: Theme.of(context).brightness == Brightness.dark
                     ? Colors.white
                     : Colors.black87,
               ),
@@ -1715,55 +2088,67 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 if (hasPinnedMessages)
                   IconButton(
                     icon: const Icon(Icons.push_pin, size: 18),
-                    color: Colors.white,
+                    color: Theme.of(context).brightness == Brightness.dark
+                        ? Colors.white
+                        : Colors.black87,
                     onPressed: _openPinnedMessages,
                   ),
                 IconButton(
                   icon: FaIcon(
                     FontAwesomeIcons.plus,
                     size: 18,
-                    color: theme.brightness == Brightness.dark
+                    color: Theme.of(context).brightness == Brightness.dark
                         ? Colors.white
                         : Colors.black87,
                   ),
                   onPressed: _createNewChat,
                 ),
-                if (_currentChat != null) ...[
-                  if (!_currentChat!.isGroup)
-                    IconButton(
-                      icon: FaIcon(
-                        FontAwesomeIcons.userPlus,
-                        size: 18,
-                        color: _hasUserSentMessage(_currentChat!)
-                            ? (theme.brightness == Brightness.dark
+                // --- Gizli Sohbet Butonu ---
+                if (_currentChat == null ||
+                    (_currentChat?.messages.isEmpty ?? true))
+                  IconButton(
+                    icon: FaIcon(
+                      _isSecretMode
+                          ? FontAwesomeIcons.xmark
+                          : FontAwesomeIcons.userSecret,
+                      size: 18,
+                      color: _isSecretMode
+                          ? Colors.redAccent
+                          : (Theme.of(context).brightness == Brightness.dark
                                 ? Colors.white
-                                : Colors.black87)
-                            : Colors.grey,
-                      ),
-                      tooltip: 'Grup Oluştur',
-                      onPressed: _hasUserSentMessage(_currentChat!)
-                          ? _handleCreateGroupChat
-                          : null,
-                    )
-                  else
-                    IconButton(
-                      icon: FaIcon(
-                        FontAwesomeIcons.gear,
-                        size: 18,
-                        color: theme.brightness == Brightness.dark
-                            ? Colors.white
-                            : Colors.black87,
-                      ),
-                      tooltip: 'Grup Ayarları',
-                      onPressed: _showGroupSettingsPanel,
+                                : Colors.black87),
                     ),
-                ],
+                    onPressed: () {
+                      setState(() {
+                        _isSecretMode = !_isSecretMode;
+                        if (_isSecretMode) {
+                          _currentChat =
+                              null; // Gizli moda geçerken mevcut sohbeti boşalt
+                        }
+                      });
+                    },
+                  ),
               ],
             ),
           ),
         ],
       ),
     );
+  }
+
+  String _getTimeAgo(DateTime dateTime) {
+    final now = DateTime.now();
+    final difference = now.difference(dateTime);
+
+    if (difference.inDays >= 1) {
+      return '${difference.inDays} gn';
+    } else if (difference.inHours >= 1) {
+      return '${difference.inHours} sa';
+    } else if (difference.inMinutes >= 1) {
+      return '${difference.inMinutes} dk';
+    } else {
+      return 'şimdi';
+    }
   }
 
   Widget _buildEmptyState() {
@@ -1775,59 +2160,183 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           mainAxisAlignment: MainAxisAlignment.center,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              'Merhaba, ben ForeSee',
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-                color: theme.brightness == Brightness.dark
-                    ? Colors.white
-                    : Colors.black87,
+            if (!_isSecretMode) ...[
+              Text(
+                'Merhaba, ben ForeSee',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Colors.white
+                      : Colors.black87,
+                ),
+                textAlign: TextAlign.center,
               ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Sana nasıl yardımcı olabilirim?',
-              style: TextStyle(
-                fontSize: 16,
-                color: theme.brightness == Brightness.dark
-                    ? Colors.white70
-                    : Colors.black54,
+              const SizedBox(height: 8),
+              Text(
+                'Sana nasıl yardımcı olabilirim?',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Colors.white70
+                      : Colors.black54,
+                ),
+                textAlign: TextAlign.center,
               ),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _showSuggestions = !_showSuggestions;
-                });
-              },
-              child: Column(
-                children: [
-                  Text(
-                    'Öneriler',
-                    style: TextStyle(
-                      color: Colors.blueAccent,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _showSuggestions = !_showSuggestions;
+                  });
+                },
+                child: Column(
+                  children: [
+                    Text(
+                      'Öneriler',
+                      style: TextStyle(
+                        color: Colors.blueAccent,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Icon(
-                    _showSuggestions
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    color: theme.brightness == Brightness.dark ? Colors.white : Colors.black87,
-                    size: 18,
-                  ),
-                ],
+                    const SizedBox(height: 2),
+                    Icon(
+                      _showSuggestions
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Colors.white
+                          : Colors.black87,
+                      size: 18,
+                    ),
+                  ],
+                ),
               ),
-            ),
+            ] else ...[
+              const FaIcon(
+                FontAwesomeIcons.userSecret,
+                size: 64,
+                color: Colors.redAccent,
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Gizli Sohbet',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.redAccent,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Bu sohbet kaydedilmeyecek ve geçicidir.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Colors.white54
+                      : Colors.black54,
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             AnimatedCrossFade(
-              firstChild: const SizedBox.shrink(),
+              firstChild: _chats.isEmpty || _showSuggestions
+                  ? const SizedBox.shrink()
+                  : Column(
+                      children: [
+                        ..._chats.where((c) => c.messages.isNotEmpty).take(3).map((
+                          chat,
+                        ) {
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8.0),
+                            child: InkWell(
+                              onTap: () => _handleChatSelected(chat),
+                              borderRadius: BorderRadius.circular(12),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: themeService.isDarkMode
+                                      ? Colors.white.withOpacity(0.05)
+                                      : Colors.black.withOpacity(0.03),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: themeService.isDarkMode
+                                        ? Colors.white.withOpacity(0.1)
+                                        : Colors.black.withOpacity(0.05),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    if (chat.projectColor != null)
+                                      Container(
+                                        width: 10,
+                                        height: 10,
+                                        margin: const EdgeInsets.only(right: 8),
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Color(chat.projectColor!),
+                                          border: Border.all(
+                                            color:
+                                                chat.projectColor == 0xFF000000
+                                                ? (themeService.isDarkMode
+                                                      ? Colors.white54
+                                                      : Colors.black12)
+                                                : (chat.projectColor ==
+                                                          0xFFFFFFFF
+                                                      ? Colors.black12
+                                                      : Colors.transparent),
+                                            width: 1,
+                                          ),
+                                        ),
+                                      ),
+                                    Expanded(
+                                      child: Text(
+                                        chat.title,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: themeService.isDarkMode
+                                              ? Colors.white
+                                              : Colors.black87,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        FaIcon(
+                                          FontAwesomeIcons.clockRotateLeft,
+                                          size: 11,
+                                          color: themeService.isDarkMode
+                                              ? Colors.white38
+                                              : Colors.black38,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          '${_getTimeAgo(chat.updatedAt)} önce',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: themeService.isDarkMode
+                                                ? Colors.white38
+                                                : Colors.black38,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ],
+                    ),
               secondChild: Wrap(
                 spacing: 8,
                 runSpacing: 8,
@@ -1875,13 +2384,20 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
-          color: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Colors.white,
+          color: themeService.isDarkMode
+              ? const Color(0xFF1A1A1A)
+              : Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: themeService.isDarkMode ? Colors.white24 : Colors.grey[300]!),
+          border: Border.all(
+            color: themeService.isDarkMode ? Colors.white24 : Colors.grey[300]!,
+          ),
         ),
         child: Text(
           text,
-          style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87, fontSize: 13),
+          style: TextStyle(
+            color: themeService.isDarkMode ? Colors.white : Colors.black87,
+            fontSize: 13,
+          ),
         ),
       ),
     );
@@ -1953,6 +2469,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 : null,
             fontSizeIndex: _fontSizeIndex,
             fontFamily: _fontFamily,
+            streamingContent: _isTyping && message.id == _typingMessageId
+                ? _streamingContent
+                : null,
             isLastAiMessage: isLastAiMessage,
             onRetry: isLastAiMessage ? _retryAiMessage : null,
             onWebCapture: _handleWebCapture,
@@ -1967,11 +2486,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             onCodeReferenceGenerated: _handleCodeReferenceGenerated,
             onSettingsLinkTapped: _navigateToSetting,
             onAlternativeSelected: _handleAlternativeSelected,
+            onToolApproval: _handleToolApproval,
             reasoning:
                 _activeResponseChatId == _currentChat?.id && isTypingBubble
                 ? _agentThinking
                 : null,
             onShowReasoning: () => _showReasoningSheet(_agentThinking),
+            isPlayingAudio: _playingMessageId == message.id,
+            isAudioLoading: _isAudioLoading && _playingMessageId == message.id,
+            onPlay: () => _handlePlayAudio(message.id, message.content),
+            onStop: _handleStopAudio,
+            showAudioButton: !message.isUser,
+            onOpenArtifact: _openArtifactPanel,
           ),
         );
       },
@@ -2041,11 +2567,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (bottomSheetContext) {
+        final theme = Theme.of(context);
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -2059,19 +2586,25 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     height: 4,
                     margin: const EdgeInsets.only(bottom: 12),
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: Theme.of(context).dividerColor.withOpacity(0.3),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
                 ),
                 Row(
-                  children: const [
-                    Icon(Icons.push_pin, color: Colors.white70, size: 18),
-                    SizedBox(width: 8),
+                  children: [
+                    Icon(
+                      Icons.push_pin,
+                      color: Theme.of(
+                        context,
+                      ).iconTheme.color?.withOpacity(0.7),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
                     Text(
                       'Sabitlenmiş Mesajlar',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: Theme.of(context).textTheme.bodyLarge?.color,
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
                       ),
@@ -2081,23 +2614,32 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 const SizedBox(height: 8),
                 Text(
                   '${pinnedEntries.length} sabitlenmiş mesaj var',
-                  style: const TextStyle(color: Colors.white60, fontSize: 13),
+                  style: TextStyle(
+                    color: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.color?.withOpacity(0.6),
+                    fontSize: 13,
+                  ),
                 ),
                 const SizedBox(height: 12),
                 SizedBox(
                   height: 260,
                   child: ListView.separated(
                     itemCount: pinnedEntries.length,
-                    separatorBuilder: (context, index) =>
-                        const Divider(color: Colors.white24, height: 12),
+                    separatorBuilder: (context, index) => Divider(
+                      color: Theme.of(context).dividerColor.withOpacity(0.1),
+                      height: 12,
+                    ),
                     itemBuilder: (context, index) {
                       final entry = pinnedEntries[index];
                       final Message msg = entry['message'] as Message;
                       final int msgIndex = entry['index'] as int;
                       final fullText = msg.content.trim();
-                      final displayText = fullText.isEmpty
-                          ? '[Boş mesaj]'
-                          : fullText;
+
+                      final allImages = <String>[];
+                      if (msg.imageUrl != null) allImages.add(msg.imageUrl!);
+                      if (msg.imageUrls != null)
+                        allImages.addAll(msg.imageUrls!);
 
                       return ListTile(
                         dense: true,
@@ -2105,51 +2647,81 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           horizontal: 0,
                           vertical: 4,
                         ),
-                        leading: const Icon(
+                        leading: Icon(
                           Icons.push_pin,
-                          color: Colors.white70,
+                          color: Theme.of(
+                            context,
+                          ).iconTheme.color?.withOpacity(0.7),
                           size: 18,
                         ),
-                        title: Row(
+                        title: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
-                              '•',
-                              style: TextStyle(
-                                color: Colors.white70,
-                                fontSize: 18,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                displayText,
-                                style: const TextStyle(
-                                  color: Colors.white,
+                            if (fullText.isNotEmpty)
+                              Text(
+                                fullText,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).textTheme.bodyMedium?.color,
                                   fontSize: 13,
                                 ),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),
-                            ),
+                            if (allImages.isNotEmpty) ...[
+                              if (fullText.isNotEmpty)
+                                const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 4,
+                                runSpacing: 4,
+                                children: allImages.map((url) {
+                                  return ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: Image.network(
+                                      url,
+                                      width: 40,
+                                      height: 40,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (c, e, s) => Container(
+                                        width: 40,
+                                        height: 40,
+                                        color: Colors.grey.withOpacity(0.2),
+                                        child: const Icon(
+                                          Icons.broken_image,
+                                          size: 16,
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ],
+                            if (fullText.isEmpty && allImages.isEmpty)
+                              Text(
+                                '[Boş mesaj]',
+                                style: TextStyle(
+                                  color: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.color
+                                      ?.withOpacity(0.5),
+                                  fontSize: 13,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
                           ],
                         ),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const SizedBox(height: 2),
-                            const Text(
-                              'devamını göster...',
-                              style: TextStyle(
-                                color: Colors.white38,
-                                fontSize: 11,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
+                            const SizedBox(height: 4),
                             Text(
                               msg.isUser ? 'Kullanıcı' : 'ForeSee',
-                              style: const TextStyle(
-                                color: Colors.white54,
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).textTheme.bodySmall?.color?.withOpacity(0.6),
                                 fontSize: 11,
                               ),
                             ),
@@ -2447,7 +3019,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _activeResponseChatId = targetChatId;
       _isTyping = true;
       _typingMessageId = derivedMessage.id;
-      _currentTypingText = '';
+      _streamingContent.value = ''; // Reset for new stream
       _fullResponseText = '';
       _loadingMessage = 'Düşünüyor...';
     });
@@ -2469,26 +3041,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _fullResponseText = streamedText;
           // Kullanıcıya gösterilen metinden KAYNAKLAR_JSON ve inline data:image bloklarını canlı olarak gizle
           final cleaned = _cleanStreamingTextForDisplay(streamedText);
-          _currentTypingText = _formatQuickActionResult(actionId, cleaned);
-
-          setState(() {
-            final chatIndex = _chats.indexWhere((c) => c.id == targetChatId);
-            if (chatIndex == -1) return;
-            final msgs = [..._chats[chatIndex].messages];
-            final msgIndex = msgs.indexWhere((m) => m.id == derivedMessage.id);
-            if (msgIndex == -1) return;
-            msgs[msgIndex] = msgs[msgIndex].copyWith(
-              content: _currentTypingText,
-              isStopped: false,
-            );
-            _chats[chatIndex] = _chats[chatIndex].copyWith(
-              messages: msgs,
-              updatedAt: DateTime.now(),
-            );
-            if (_currentChat?.id == targetChatId) {
-              _currentChat = _chats[chatIndex];
-            }
-          });
+          _streamingContent.value = _formatQuickActionResult(actionId, cleaned);
 
           if (!_showScrollToBottom) {
             _scrollToBottomQuick();
@@ -2496,6 +3049,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         },
         shouldStop: () => _shouldStopResponse,
         maxTokens: 600,
+        onToolCall: (name, args, id, isFinal) => _handleIncomingToolCall(
+          name,
+          args,
+          id,
+          derivedMessage.id,
+          targetChatId,
+          isFinal,
+        ),
       );
       // Streaming tamamlandı, cevabı temizle ve kaynakları ayıkla
       if (streamedText.isNotEmpty) {
@@ -2539,9 +3100,859 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _typingMessageId = null;
         _shouldStopResponse = false;
         _stoppedMessageId = null;
+        _streamingContent.value = ''; // Clear streaming content
       });
       await _storageService.saveChats(_chats);
     }
+  }
+
+  Future<void> _handlePlayAudio(String messageId, String text) async {
+    if (_playingMessageId == messageId) {
+      // If already playing this, toggle pause?
+      // For now re-synthesize or resume requires more logic, let's just restart or do nothing.
+      // User experience: tapping "Read Aloud" on same message might restart.
+      // Let's assume standard behavior: Stop previous, start new.
+      await _handleStopAudio();
+    } else {
+      await _handleStopAudio(); // Stop others
+    }
+
+    setState(() {
+      _isAudioLoading = true;
+      _playingMessageId = messageId;
+      _isAudioBarVisible = true; // Show bar immediately
+      _audioDuration = Duration.zero;
+      _audioPosition = Duration.zero;
+    });
+
+    try {
+      final preferredVoiceId =
+          await _storageService.getElevenLabsVoiceId() ??
+          'cgSgspJ2msm6clMCkdW9';
+      final tempDir = await getTemporaryDirectory();
+      final cacheFile = File(
+        '${tempDir.path}/tts_${preferredVoiceId}_$messageId.mp3',
+      );
+
+      // Check if already exists in cache
+      if (await cacheFile.exists()) {
+        await _audioPlayer.play(DeviceFileSource(cacheFile.path));
+        if (mounted) {
+          setState(() {
+            _isAudioLoading = false;
+          });
+        }
+        return;
+      }
+
+      // If not in cache, synthesize
+      final audioFile = await ElevenLabsService().generateSpeech(
+        text,
+        voiceId: preferredVoiceId,
+      );
+
+      if (audioFile != null) {
+        // Copy to our cache location with a predictable name
+        await audioFile.copy(cacheFile.path);
+
+        await _audioPlayer.play(DeviceFileSource(cacheFile.path));
+
+        if (mounted) {
+          setState(() {
+            _isAudioLoading = false;
+          });
+        }
+      } else {
+        throw Exception('Ses üretilemedi');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _playingMessageId = null;
+          _isAudioLoading = false;
+          _isAudioBarVisible = false;
+        });
+        GreyNotification.show(context, 'TTS Hatası: $e');
+      }
+    }
+  }
+
+  Future<void> _handleStopAudio() async {
+    await _audioPlayer.stop();
+    if (mounted) {
+      setState(() {
+        _playingMessageId = null;
+        _isAudioLoading = false;
+        _isAudioBarVisible = false;
+        _audioPosition = Duration.zero;
+      });
+    }
+  }
+
+  Future<void> _handlePauseAudio() async {
+    await _audioPlayer.pause();
+    setState(
+      () => _playingMessageId = null,
+    ); // Mark as not "playing" (shows play icon)
+    // Keep bar visible
+  }
+
+  Future<void> _handleResumeAudio() async {
+    if (_playingMessageId != null) return; // Already playing
+    // We need to know WHICH message was paused to resume correctly if we track that.
+    // But for simple "Play/Pause" in bar, we just call resume on player.
+    await _audioPlayer.resume();
+    // However we need _playingMessageId to show "Pause" icon.
+    // Since we cleared it on pause, we need to restore it OR use a separate _isPlaying state.
+    // Let's simplify: _playingMessageId != null implies ACTIVE.
+    // We need a separate variable for "ID of content loaded".
+    // But simpler: just toggle player state.
+
+    // Correct approach: _playerState can be tracked or query player.
+    // Let's use player.state stream or just assume we resume current track.
+    setState(() {
+      // We need the ID back to highlight the message or just valid state.
+      // If we don't track the paused ID, we can't restore _playingMessageId exactly.
+      // Hack: Don't clear _playingMessageId on pause. Add _isPaused bool.
+    });
+  }
+
+  // Revised Stop/Pause logic for Overlay:
+  // The overlay controls the player directly.
+
+  Widget _buildAudioOverlay() {
+    if (!_isAudioBarVisible) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Positioned(
+      top: MediaQuery.of(context).padding.top + 10,
+      left: 16,
+      right: 16,
+      child: Material(
+        elevation: 8,
+        color: Colors.transparent,
+        child: Container(
+          height: 56,
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E1E1E) : Colors.white,
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.2),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+            border: Border.all(color: isDark ? Colors.white10 : Colors.black12),
+          ),
+          child: _isAudioLoading
+              ? Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: isDark ? Colors.white70 : Colors.black87,
+                    ),
+                  ),
+                )
+              : Row(
+                  children: [
+                    // Play/Pause Button (Left)
+                    IconButton(
+                      icon: Icon(
+                        _audioPlayer.state == PlayerState.playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                      onPressed: () async {
+                        if (_audioPlayer.state == PlayerState.playing) {
+                          await _audioPlayer.pause();
+                          setState(() {}); // Refresh icon
+                        } else {
+                          await _audioPlayer.resume();
+                          setState(() {});
+                        }
+                      },
+                    ),
+
+                    // Slider (Center)
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 2,
+                          thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 6,
+                          ),
+                          overlayShape: const RoundSliderOverlayShape(
+                            overlayRadius: 14,
+                          ),
+                          activeTrackColor: isDark
+                              ? Colors.white
+                              : Colors.black,
+                          inactiveTrackColor: isDark
+                              ? Colors.white24
+                              : Colors.black12,
+                          thumbColor: isDark ? Colors.white : Colors.black,
+                        ),
+                        child: Slider(
+                          value: _audioPosition.inMilliseconds.toDouble().clamp(
+                            0,
+                            _audioDuration.inMilliseconds.toDouble(),
+                          ),
+                          max: _audioDuration.inMilliseconds.toDouble() > 0
+                              ? _audioDuration.inMilliseconds.toDouble()
+                              : 1.0,
+                          onChanged: (val) {
+                            _audioPlayer.seek(
+                              Duration(milliseconds: val.toInt()),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+
+                    // Close Button (Right)
+                    IconButton(
+                      icon: Icon(
+                        Icons.close,
+                        size: 20,
+                        color: isDark ? Colors.white54 : Colors.black45,
+                      ),
+                      onPressed: _handleStopAudio,
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  // FOLDER MANAGEMENT
+  Future<void> _loadFolders() async {
+    final loaded = await _storageService.loadFolders();
+    if (mounted) {
+      setState(() {
+        _folders = loaded;
+      });
+    }
+  }
+
+  Future<void> _handleCreateFolder() async {
+    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final nameController = TextEditingController();
+    int? selectedColorValue = Colors.blue.value;
+    String? selectedEmoji;
+    bool isSecret = false;
+    LockType lockType = LockType.none;
+    String? lockData;
+
+    final palette = [
+      const Color(0xFFEF5350),
+      const Color(0xFFEC407A),
+      const Color(0xFFAB47BC),
+      const Color(0xFF7E57C2),
+      const Color(0xFF5C6BC0),
+      const Color(0xFF42A5F5),
+      const Color(0xFF29B6F6),
+      const Color(0xFF26C6DA),
+      const Color(0xFF26A69A),
+      const Color(0xFF66BB6A),
+      const Color(0xFF9CCC65),
+      const Color(0xFFD4E157),
+      const Color(0xFFFFEE58),
+      const Color(0xFFFFCA28),
+      const Color(0xFFFF7043),
+      const Color(0xFF8D6E63),
+    ];
+
+    final emojis = [
+      '📁',
+      '📂',
+      '💼',
+      '📝',
+      '📚',
+      '📕',
+      '💡',
+      '🧠',
+      '🤖',
+      '💻',
+      '🎮',
+      '🎵',
+      '🎨',
+      '🎬',
+      '⚽',
+      '🏀',
+      '🍎',
+      '☕',
+      '🚀',
+      '⭐',
+      '❤️',
+      '🔥',
+      '✨',
+      '⚡',
+      '🏠',
+      '🏢',
+      '✈️',
+      '🌍',
+      '🔒',
+      '🔑',
+      '🚫',
+      '⚠️',
+    ];
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) => AlertDialog(
+          backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+          title: Text(
+            'Yeni Klasör',
+            style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    style: TextStyle(
+                      color: isDark ? Colors.white : Colors.black87,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'Klasör Adı',
+                      labelStyle: TextStyle(
+                        color: isDark ? Colors.white60 : Colors.black54,
+                      ),
+                    ),
+                    autofocus: true,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'İkon',
+                    style: TextStyle(
+                      color: isDark ? Colors.white70 : Colors.black87,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 120,
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: emojis.map((e) {
+                          final isSelected = selectedEmoji == e;
+                          return GestureDetector(
+                            onTap: () => setStateDialog(
+                              () => selectedEmoji = isSelected ? null : e,
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? (isDark ? Colors.white10 : Colors.black12)
+                                    : null,
+                                borderRadius: BorderRadius.circular(8),
+                                border: isSelected
+                                    ? Border.all(
+                                        color: isDark
+                                            ? Colors.white54
+                                            : Colors.black54,
+                                      )
+                                    : null,
+                              ),
+                              child: Text(
+                                e,
+                                style: const TextStyle(fontSize: 24),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Renk',
+                    style: TextStyle(
+                      color: isDark ? Colors.white70 : Colors.black87,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      GestureDetector(
+                        onTap: () =>
+                            setStateDialog(() => selectedColorValue = null),
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: isDark ? Colors.white10 : Colors.grey[200],
+                            border: Border.all(
+                              color: selectedColorValue == null
+                                  ? (isDark ? Colors.white : Colors.black)
+                                  : Colors.transparent,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            FontAwesomeIcons.ban,
+                            size: 14,
+                            color: isDark ? Colors.white54 : Colors.black45,
+                          ),
+                        ),
+                      ),
+                      ...palette.map((c) {
+                        final isSelected = selectedColorValue == c.value;
+                        return GestureDetector(
+                          onTap: () => setStateDialog(
+                            () => selectedColorValue = c.value,
+                          ),
+                          child: Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: c,
+                              border: Border.all(
+                                color: isSelected
+                                    ? (isDark ? Colors.white : Colors.black)
+                                    : Colors.transparent,
+                                width: isSelected ? 2.5 : 0,
+                              ),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: c.withOpacity(0.4),
+                                        blurRadius: 6,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: isSelected
+                                ? Center(
+                                    child: Icon(
+                                      Icons.check,
+                                      size: 14,
+                                      color: c.computeLuminance() > 0.5
+                                          ? Colors.black
+                                          : Colors.white,
+                                    ),
+                                  )
+                                : null,
+                          ),
+                        );
+                      }).toList(),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                'İptal',
+                style: TextStyle(
+                  color: isDark ? Colors.white60 : Colors.black54,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, {
+                'name': nameController.text.trim(),
+                'color': selectedColorValue,
+                'icon': selectedEmoji,
+              }),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isDark ? Colors.white : Colors.black,
+                foregroundColor: isDark ? Colors.black : Colors.white,
+              ),
+              child: const Text('Oluştur'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null && result['name'].isNotEmpty) {
+      final newFolder = ChatFolder(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        name: result['name'],
+        color: result['color'] ?? Colors.grey.value,
+        icon: result['icon'],
+        isExpanded: true,
+        createdAt: DateTime.now(),
+      );
+      setState(() => _folders.add(newFolder));
+      await _storageService.saveFolders(_folders);
+    }
+  }
+
+  Future<void> _handleEditFolder(ChatFolder folder) async {
+    final theme = Theme.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final nameController = TextEditingController(text: folder.name);
+    int? selectedColorValue = folder.color;
+    String? selectedEmoji = folder.icon;
+
+    final palette = [
+      const Color(0xFFEF5350),
+      const Color(0xFFEC407A),
+      const Color(0xFFAB47BC),
+      const Color(0xFF7E57C2),
+      const Color(0xFF5C6BC0),
+      const Color(0xFF42A5F5),
+      const Color(0xFF29B6F6),
+      const Color(0xFF26C6DA),
+      const Color(0xFF26A69A),
+      const Color(0xFF66BB6A),
+      const Color(0xFF9CCC65),
+      const Color(0xFFD4E157),
+      const Color(0xFFFFEE58),
+      const Color(0xFFFFCA28),
+      const Color(0xFFFF7043),
+      const Color(0xFF8D6E63),
+    ];
+
+    final emojis = [
+      '📁',
+      '📂',
+      '💼',
+      '📝',
+      '📚',
+      '📕',
+      '💡',
+      '🧠',
+      '🤖',
+      '💻',
+      '🎮',
+      '🎵',
+      '🎨',
+      '🎬',
+      '⚽',
+      '🏀',
+      '🍎',
+      '☕',
+      '🚀',
+      '⭐',
+      '❤️',
+      '🔥',
+      '✨',
+      '⚡',
+      '🏠',
+      '🏢',
+      '✈️',
+      '🌍',
+      '🔒',
+      '🔑',
+      '🚫',
+      '⚠️',
+    ];
+
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setStateDialog) => AlertDialog(
+          backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+          title: Text(
+            'Klasörü Düzenle',
+            style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    style: TextStyle(
+                      color: isDark ? Colors.white : Colors.black87,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'Klasör Adı',
+                      labelStyle: TextStyle(
+                        color: isDark ? Colors.white60 : Colors.black54,
+                      ),
+                    ),
+                    autofocus: true,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'İkon',
+                    style: TextStyle(
+                      color: isDark ? Colors.white70 : Colors.black87,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    height: 120, // Limited height for emojis
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: emojis.map((e) {
+                          final isSelected = selectedEmoji == e;
+                          return GestureDetector(
+                            onTap: () => setStateDialog(
+                              () => selectedEmoji = isSelected ? null : e,
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? (isDark ? Colors.white10 : Colors.black12)
+                                    : null,
+                                borderRadius: BorderRadius.circular(8),
+                                border: isSelected
+                                    ? Border.all(
+                                        color: isDark
+                                            ? Colors.white54
+                                            : Colors.black54,
+                                      )
+                                    : null,
+                              ),
+                              child: Text(
+                                e,
+                                style: const TextStyle(fontSize: 24),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Renk',
+                    style: TextStyle(
+                      color: isDark ? Colors.white70 : Colors.black87,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      GestureDetector(
+                        onTap: () =>
+                            setStateDialog(() => selectedColorValue = null),
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: isDark ? Colors.white10 : Colors.grey[200],
+                            border: Border.all(
+                              color: selectedColorValue == null
+                                  ? (isDark ? Colors.white : Colors.black)
+                                  : Colors.transparent,
+                              width: 2,
+                            ),
+                          ),
+                          child: Icon(
+                            FontAwesomeIcons.ban,
+                            size: 14,
+                            color: isDark ? Colors.white54 : Colors.black45,
+                          ),
+                        ),
+                      ),
+                      ...palette.map((c) {
+                        final isSelected = selectedColorValue == c.value;
+                        return GestureDetector(
+                          onTap: () => setStateDialog(
+                            () => selectedColorValue = c.value,
+                          ),
+                          child: Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: c,
+                              border: Border.all(
+                                color: isSelected
+                                    ? (isDark ? Colors.white : Colors.black)
+                                    : Colors.transparent,
+                                width: isSelected ? 2.5 : 0,
+                              ),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: c.withOpacity(0.4),
+                                        blurRadius: 6,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: isSelected
+                                ? Center(
+                                    child: Icon(
+                                      Icons.check,
+                                      size: 14,
+                                      color: c.computeLuminance() > 0.5
+                                          ? Colors.black
+                                          : Colors.white,
+                                    ),
+                                  )
+                                : null,
+                          ),
+                        );
+                      }).toList(),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+              ),
+            ),
+          ),
+
+          // -----------------------------
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                'İptal',
+                style: TextStyle(
+                  color: isDark ? Colors.white60 : Colors.black54,
+                ),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, {
+                'name': nameController.text.trim(),
+                'color': selectedColorValue,
+                'icon': selectedEmoji,
+              }),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isDark ? Colors.white : Colors.black,
+                foregroundColor: isDark ? Colors.black : Colors.white,
+              ),
+              child: const Text('Kaydet'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null && result['name'].isNotEmpty) {
+      setState(() {
+        final index = _folders.indexWhere((f) => f.id == folder.id);
+        if (index != -1) {
+          _folders[index] = folder.copyWith(
+            name: result['name'],
+            color: result['color'] ?? Colors.grey.value,
+            icon: result['icon'],
+          );
+        }
+      });
+      await _storageService.saveFolders(_folders);
+    }
+  }
+
+  Future<void> _handleDeleteFolder(ChatFolder folder) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Klasörü Sil'),
+        content: const Text(
+          'Bu klasör silinecek. Sohbetler silinmeyecek, sadece klasörden çıkarılacak.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('İptal'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() {
+        _folders.removeWhere((f) => f.id == folder.id);
+        for (var i = 0; i < _chats.length; i++) {
+          if (_chats[i].folderId == folder.id) {
+            _chats[i] = _chats[i].copyWith(folderId: null, clearFolderId: true);
+          }
+        }
+      });
+      await _storageService.saveFolders(_folders);
+      await _storageService.saveChats(_chats);
+    }
+  }
+
+  Future<void> _handleToggleFolderPin(ChatFolder folder) async {
+    final index = _folders.indexWhere((f) => f.id == folder.id);
+    if (index != -1) {
+      setState(() {
+        _folders[index] = _folders[index].copyWith(
+          isPinned: !_folders[index].isPinned,
+        );
+      });
+      await _storageService.saveFolders(_folders);
+    }
+  }
+
+  Future<void> _handleToggleFolder(ChatFolder folder) async {
+    // Just toggle without verification
+    final newExpandedState = !folder.isExpanded;
+
+    if (!mounted) return;
+    setState(() {
+      final index = _folders.indexWhere((f) => f.id == folder.id);
+      if (index != -1) {
+        _folders[index] = folder.copyWith(isExpanded: newExpandedState);
+      }
+    });
+    await _storageService.saveFolders(_folders);
+  }
+
+  Future<void> _handleChatMoveToFolder(Chat chat, String? folderId) async {
+    setState(() {
+      final index = _chats.indexWhere((c) => c.id == chat.id);
+      if (index != -1) {
+        _chats[index] = chat.copyWith(
+          folderId: folderId,
+          clearFolderId: folderId == null,
+        );
+        if (_currentChat?.id == chat.id) {
+          _currentChat = _chats[index];
+        }
+      }
+    });
+    await _storageService.saveChats(_chats);
   }
 
   Future<void> _loadData() async {
@@ -2551,6 +3962,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         .getNotificationsEnabled();
     final fontSizeIndex = await _storageService.getFontSizeIndex();
     final fontFamily = await _storageService.getFontFamily();
+    final folders = await _storageService.loadFolders();
+    final isGmailAiAlwaysAllowed = await _storageService
+        .getIsGmailAiAlwaysAllowed();
+    final isGithubAiAlwaysAllowed = await _storageService
+        .getIsGithubAiAlwaysAllowed();
+    final isOutlookAiAlwaysAllowed = await _storageService
+        .getIsOutlookAiAlwaysAllowed();
+
+    // Servisleri sessizce başlat (otomatik bağlantı)
+    await _gmailService.initialize();
+    await _githubService.initialize();
+    await OutlookService.instance.initialize();
 
     final now = DateTime.now();
     // 1 haftadan eski çöp kutusu kayıtlarını kalıcı olarak temizle
@@ -2582,6 +4005,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _fontFamily = (fontFamily == null || fontFamily.isEmpty)
           ? null
           : fontFamily;
+      _folders = folders;
+      _isGmailAiAlwaysAllowed = isGmailAiAlwaysAllowed;
+      _isGithubAiAlwaysAllowed = isGithubAiAlwaysAllowed;
+      _isOutlookAiAlwaysAllowed = isOutlookAiAlwaysAllowed;
     });
 
     // CurrentChatId'yi temizle
@@ -2611,6 +4038,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         .getNotificationsEnabled();
     final fontSizeIndex = await _storageService.getFontSizeIndex();
     final fontFamily = await _storageService.getFontFamily();
+    final isGmailAiAlwaysAllowed = await _storageService
+        .getIsGmailAiAlwaysAllowed();
+    final isGithubAiAlwaysAllowed = await _storageService
+        .getIsGithubAiAlwaysAllowed();
 
     if (!mounted) return;
     setState(() {
@@ -2619,6 +4050,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _fontFamily = (fontFamily == null || fontFamily.isEmpty)
           ? null
           : fontFamily;
+      _isGmailAiAlwaysAllowed = isGmailAiAlwaysAllowed;
+      _isGithubAiAlwaysAllowed = isGithubAiAlwaysAllowed;
     });
   }
 
@@ -2638,6 +4071,31 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
 
+    // --- Security Check ---
+    bool isLocked = chat.isLocked;
+    LockType type = chat.lockType;
+    String? data = chat.lockData;
+    String title = chat.title;
+
+    // Check parent folder lock if chat itself isn't locked (or even if it is, maybe double lock?)
+    // For now, let's prioritize chat lock, then folder lock.
+
+    if (isLocked) {
+      final verified = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (context) => LockVerificationScreen(
+            lockType: type,
+            lockData: data,
+            title: '$title Kilidini Aç',
+          ),
+        ),
+      );
+
+      if (verified != true) return; // Authentication failed or cancelled
+    }
+    // ----------------------
+
     // Eski stream'i iptal et
     await _groupMessagesSubscription?.cancel();
     _groupMessagesSubscription = null;
@@ -2646,6 +4104,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _currentChat = chat;
       _currentTodoTasks = chat.projectTasks ?? [];
       _isTodoPanelOpen = false;
+      _ephemeralMessages.clear(); // Sohbet değişince geçici mesajları temizle
 
       final index = _chats.indexWhere((c) => c.id == chat.id);
       if (index != -1) {
@@ -2662,6 +4121,130 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     if (mounted && Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
+    }
+  }
+
+  void _openChatSummaries(Chat chat) async {
+    if (!mounted) return;
+    if (!await _verifyLockIfNeeded(chat)) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ChatSummariesScreen(chat: chat)),
+    );
+
+    // Refresh chats to pick up any generated summaries
+    // This fixes the issue where re-entering the screen would regenerate the summary
+    // because the ChatScreen held stale data.
+    if (!mounted) return;
+    final chats = await _storageService.loadChats();
+    if (!mounted) return;
+
+    setState(() {
+      _chats = chats;
+      // Also update _currentChat if it matches the one we just summarized
+      if (_currentChat?.id == chat.id) {
+        final index = _chats.indexWhere((c) => c.id == chat.id);
+        if (index != -1) {
+          _currentChat = _chats[index];
+        }
+      }
+    });
+  }
+
+  Future<bool> _verifyLockIfNeeded(Chat chat) async {
+    if (!chat.isLocked) return true;
+
+    if (!mounted) return false;
+    final verified = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => LockVerificationScreen(
+          lockType: chat.lockType,
+          lockData: chat.lockData,
+          title: '${chat.title} Kilidini Aç',
+        ),
+      ),
+    );
+
+    return verified == true;
+  }
+
+  Future<void> _handleChatLock(Chat chat) async {
+    // If locked -> Unlock
+    if (chat.isLocked) {
+      final verified = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (context) => LockVerificationScreen(
+            lockType: chat.lockType,
+            lockData: chat.lockData,
+            title: '${chat.title} Kilidini Kaldır',
+          ),
+        ),
+      );
+
+      if (verified != true) return;
+
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Kilidi Kaldır'),
+          content: const Text('Bu sohbetin kilidi kaldırılacak.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('İptal'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Kaldır'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed == true && mounted) {
+        setState(() {
+          final index = _chats.indexWhere((c) => c.id == chat.id);
+          if (index != -1) {
+            _chats[index] = _chats[index].copyWith(
+              isLocked: false,
+              lockType: LockType.none,
+              lockData: null,
+            );
+            if (_currentChat?.id == chat.id) {
+              _currentChat = _chats[index];
+            }
+          }
+        });
+        await _storageService.saveChats(_chats);
+      }
+      return;
+    }
+
+    // If unlocked -> Lock
+    final result = await Navigator.push<Map<String, dynamic>>(
+      context,
+      MaterialPageRoute(builder: (context) => const LockSetupScreen()),
+    );
+
+    if (result != null && mounted) {
+      setState(() {
+        final index = _chats.indexWhere((c) => c.id == chat.id);
+        if (index != -1) {
+          _chats[index] = _chats[index].copyWith(
+            isLocked: true,
+            lockType: result['type'],
+            lockData: result['data'],
+          );
+          if (_currentChat?.id == chat.id) {
+            _currentChat = _chats[index];
+          }
+        }
+      });
+      await _storageService.saveChats(_chats);
     }
   }
 
@@ -2694,6 +4277,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           fullResponse += token;
         },
         shouldStop: () => false,
+        onToolCall: (name, args, id, isFinal) async =>
+            null, // Retry'da araç gerekmiyor
       );
 
       // --- [IMGEN] GÜÇLÜ Kontrolü ---
@@ -2863,128 +4448,345 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _handleChatEdit(Chat chat) async {
+    if (!await _verifyLockIfNeeded(chat)) return;
+
     final titleController = TextEditingController(text: chat.title);
     final projectLabelController = TextEditingController(
       text: chat.projectLabel ?? '',
     );
-    final int initialColorValue = chat.projectColor ?? 0xFF2563EB;
-    Color selectedColor = Color(initialColorValue);
+    // null represent "Default" (no color) which is different from "0"
+    int? selectedColorValue = chat.projectColor;
+
+    // Helper to regenerate title
+    Future<void> regenerateTitle(StateSetter setStateDialog) async {
+      if (chat.messages.isEmpty) {
+        GreyNotification.show(
+          context,
+          'Mesaj olmayan sohbette başlık üretilemez.',
+        );
+        return;
+      }
+      setStateDialog(() {
+        titleController.text = 'Başlık üretiliyor...';
+      });
+
+      try {
+        // Last 30 messages
+        final recentMessages = chat.messages.length > 30
+            ? chat.messages.sublist(chat.messages.length - 30)
+            : chat.messages;
+
+        final history = recentMessages
+            .map(
+              (m) => {
+                'role': m.isUser ? 'user' : 'assistant',
+                'content': m.content,
+              },
+            )
+            .toList();
+
+        // Add system instruction for title
+        history.add({
+          'role': 'system',
+          'content':
+              'GENERATE_TITLE', // OpenRouterService logic or direct prompt
+        });
+
+        // Direct call to OpenRouterService with specific prompt for title
+        final prompt =
+            "Bu sohbet geçmişine dayalı kısa, özetleyici, çekici bir başlık (maksimum 4-5 kelime) oluştur. Sadece başlığı yaz, tırnak işareti kullanma.";
+        final newTitle = await _openRouterService.sendMessageWithHistory(
+          recentMessages
+              .map(
+                (m) => {
+                  'role': m.isUser ? 'user' : 'assistant',
+                  'content': m.content,
+                },
+              )
+              .toList(),
+          prompt,
+        );
+
+        if (newTitle.isNotEmpty) {
+          setStateDialog(() {
+            titleController.text = newTitle.replaceAll('"', '').trim();
+          });
+        }
+      } catch (e) {
+        setStateDialog(() {
+          titleController.text = chat.title; // Revert
+        });
+        GreyNotification.show(context, 'Başlık üretilemedi: $e');
+      }
+    }
+
+    // 45 Color Palette Generation
+    final List<Color> palette = [
+      // Greyscale
+      const Color(0xFF000000), // Black
+      const Color(0xFFFFFFFF), // White
+      const Color(0xFF9E9E9E), // Grey
+      const Color(0xFF607D8B), // BlueGrey
+      // Warm
+      const Color(0xFFEF5350), const Color(0xFFB71C1C), // Red
+      const Color(0xFFEC407A), const Color(0xFF880E4F), // Pink
+      const Color(0xFFAB47BC), const Color(0xFF4A148C), // Purple
+      const Color(0xFF7E57C2), const Color(0xFF311B92), // DeepPurple
+      const Color(0xFF5C6BC0), const Color(0xFF1A237E), // Indigo
+      // Cool
+      const Color(0xFF42A5F5), const Color(0xFF0D47A1), // Blue
+      const Color(0xFF29B6F6), const Color(0xFF01579B), // LightBlue
+      const Color(0xFF26C6DA), const Color(0xFF006064), // Cyan
+      const Color(0xFF26A69A), const Color(0xFF004D40), // Teal
+      const Color(0xFF66BB6A), const Color(0xFF1B5E20), // Green
+      const Color(0xFF9CCC65), const Color(0xFF33691E), // LightGreen
+      const Color(0xFFD4E157), const Color(0xFF827717), // Lime
+      // Hot
+      const Color(0xFFFFEE58), const Color(0xFFF57F17), // Yellow
+      const Color(0xFFFFCA28), const Color(0xFFFF6F00), // Amber
+      const Color(0xFFFF7043), const Color(0xFFBF360C), // DeepOrange
+      const Color(0xFF8D6E63), const Color(0xFF3E2723), // Brown
+    ];
+    // Fill up to ~45 if needed, but 20 pairs + 4 = 44 colors. Good enough.
 
     final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
-          title: const Text(
-            'Sohbet / Proje Ayarları',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: titleController,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'Sohbet başlığı',
-                  labelStyle: TextStyle(color: Colors.white60),
-                  hintText: 'Yeni başlık',
-                  hintStyle: TextStyle(color: Colors.white38),
-                  enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white24),
-                  ),
-                  focusedBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white),
-                  ),
-                ),
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            final theme = Theme.of(context);
+            final isDark = Theme.of(context).brightness == Brightness.dark;
+
+            return AlertDialog(
+              backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+              title: Text(
+                'Sohbet Ayarları',
+                style: TextStyle(color: isDark ? Colors.white : Colors.black87),
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: projectLabelController,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'Proje etiketi (isteğe bağlı)',
-                  labelStyle: TextStyle(color: Colors.white60),
-                  hintText: 'Örneğin: Alışveriş Listesi, Portfolio App',
-                  hintStyle: TextStyle(color: Colors.white38),
-                  enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white24),
-                  ),
-                  focusedBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 14),
-              const Text(
-                'Proje rengi',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(height: 8),
-              StatefulBuilder(
-                builder: (ctx, setStateDialog) {
-                  final colors = <Color>[
-                    const Color(0xFF2563EB), // Mavi
-                    const Color(0xFF22C55E), // Yeşil
-                    const Color(0xFFF97316), // Turuncu
-                    const Color(0xFFE11D48), // Kırmızı
-                    const Color(0xFFA855F7), // Mor
-                  ];
-                  return Row(
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      for (final c in colors)
-                        GestureDetector(
-                          onTap: () {
-                            setStateDialog(() {
-                              selectedColor = c;
-                            });
-                          },
-                          child: Container(
-                            width: 22,
-                            height: 22,
-                            margin: const EdgeInsets.only(right: 8),
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: c,
-                              border: Border.all(
-                                color: selectedColor.value == c.value
-                                    ? Colors.white
-                                    : Colors.black.withOpacity(0.6),
-                                width: selectedColor.value == c.value ? 2 : 1,
-                              ),
+                      // Title Input
+                      TextField(
+                        controller: titleController,
+                        style: TextStyle(
+                          color: isDark ? Colors.white : Colors.black87,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Sohbet Başlığı',
+                          labelStyle: TextStyle(
+                            color: isDark ? Colors.white60 : Colors.black54,
+                          ),
+                          suffixIcon: IconButton(
+                            icon: const FaIcon(
+                              FontAwesomeIcons.wandMagicSparkles,
+                              size: 16,
+                            ),
+                            color: Colors.amber,
+                            tooltip: 'AI ile Başlık Üret',
+                            onPressed: () => regenerateTitle(setStateDialog),
+                          ),
+                          enabledBorder: UnderlineInputBorder(
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white24 : Colors.black12,
+                            ),
+                          ),
+                          focusedBorder: UnderlineInputBorder(
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white : Colors.black,
                             ),
                           ),
                         ),
+                      ),
+                      const SizedBox(height: 16),
+                      // Label Input
+                      TextField(
+                        controller: projectLabelController,
+                        style: TextStyle(
+                          color: isDark ? Colors.white : Colors.black87,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Etiket (Opsiyonel)',
+                          labelStyle: TextStyle(
+                            color: isDark ? Colors.white60 : Colors.black54,
+                          ),
+                          hintText: 'Örn: İş, Kişisel, Fikir',
+                          hintStyle: TextStyle(
+                            color: isDark ? Colors.white38 : Colors.black26,
+                          ),
+                          enabledBorder: UnderlineInputBorder(
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white24 : Colors.black12,
+                            ),
+                          ),
+                          focusedBorder: UnderlineInputBorder(
+                            borderSide: BorderSide(
+                              color: isDark ? Colors.white : Colors.black,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Text(
+                        'Renk',
+                        style: TextStyle(
+                          color: isDark ? Colors.white70 : Colors.black87,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Special Options: Custom / Default
+                      Row(
+                        children: [
+                          // Default (Ban Icon)
+                          GestureDetector(
+                            onTap: () =>
+                                setStateDialog(() => selectedColorValue = null),
+                            child: Container(
+                              width: 32,
+                              height: 32,
+                              margin: const EdgeInsets.only(right: 8),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isDark
+                                    ? Colors.white10
+                                    : Colors.grey[200],
+                                border: Border.all(
+                                  color: selectedColorValue == null
+                                      ? (isDark ? Colors.white : Colors.black)
+                                      : Colors.transparent,
+                                  width: 2,
+                                ),
+                              ),
+                              child: Icon(
+                                FontAwesomeIcons.ban,
+                                size: 14,
+                                color: isDark ? Colors.white54 : Colors.black45,
+                              ),
+                            ),
+                          ),
+                          // "Özel" (Custom Picker) logic could go here, but user asked for "Özel"
+                          // which implies a curated picker. The grid below IS the custom picker.
+                          // Let's add a label "Seç" implying choice.
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+
+                      // Color Grid
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: palette.map((c) {
+                          final isSelected = selectedColorValue == c.value;
+
+                          // Stroke Logic
+                          Color borderColor = Colors.transparent;
+                          if (isSelected) {
+                            // If selected, border contrasts with background or black/white logic
+                            // But user specifically asked:
+                            // "beyaz rengi seçtiyse dışına stroke ekle dış çizgi o stroke siyah olsun eğer siyah seçtiyse stroke beyaz olsun"
+                            if (c.value == 0xFF000000) {
+                              // Black
+                              borderColor = Colors.white;
+                            } else if (c.value == 0xFFFFFFFF) {
+                              // White
+                              borderColor = Colors.black;
+                            } else {
+                              borderColor = isDark
+                                  ? Colors.white
+                                  : Colors.black;
+                            }
+                          } else {
+                            // Unselected logic for visibility on White/Black
+                            if (c.value == 0xFFFFFFFF) {
+                              borderColor = Colors
+                                  .grey[300]!; // Visible white on white bg
+                            } else if (c.value == 0xFF000000 && isDark) {
+                              borderColor =
+                                  Colors.white24; // Visible black on dark bg
+                            }
+                          }
+
+                          return GestureDetector(
+                            onTap: () => setStateDialog(
+                              () => selectedColorValue = c.value,
+                            ),
+                            child: Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: c,
+                                border: Border.all(
+                                  color: borderColor,
+                                  width: isSelected
+                                      ? 2.5
+                                      : (borderColor == Colors.transparent
+                                            ? 0
+                                            : 1),
+                                ),
+                                boxShadow: isSelected
+                                    ? [
+                                        BoxShadow(
+                                          color: c.withOpacity(0.4),
+                                          blurRadius: 6,
+                                          spreadRadius: 1,
+                                        ),
+                                      ]
+                                    : null,
+                              ),
+                              child: isSelected
+                                  ? Center(
+                                      child: Icon(
+                                        Icons.check,
+                                        size: 14,
+                                        color: (c.computeLuminance() > 0.5)
+                                            ? Colors.black
+                                            : Colors.white,
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                          );
+                        }).toList(),
+                      ),
                     ],
-                  );
-                },
+                  ),
+                ),
               ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text(
-                'İptal',
-                style: TextStyle(color: Colors.white60),
-              ),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.pop<Map<String, dynamic>>(context, {
-                  'title': titleController.text.trim(),
-                  'projectLabel': projectLabelController.text.trim(),
-                  'projectColor': selectedColor.value,
-                });
-              },
-              child: const Text('Kaydet'),
-            ),
-          ],
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text(
+                    'İptal',
+                    style: TextStyle(
+                      color: isDark ? Colors.white60 : Colors.black54,
+                    ),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop<Map<String, dynamic>>(context, {
+                      'title': titleController.text.trim(),
+                      'projectLabel': projectLabelController.text.trim(),
+                      'projectColor': selectedColorValue,
+                    });
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isDark ? Colors.white : Colors.black,
+                    foregroundColor: isDark ? Colors.black : Colors.white,
+                  ),
+                  child: const Text('Kaydet'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -2994,8 +4796,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final String newTitle = (result['title'] as String?)?.trim() ?? '';
     final String newProjectLabel =
         (result['projectLabel'] as String?)?.trim() ?? '';
-    final int newProjectColor =
-        (result['projectColor'] as int?) ?? initialColorValue;
+    final int? newProjectColor = result['projectColor'] as int?;
 
     if (newTitle.isEmpty) return;
 
@@ -3006,6 +4807,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           title: newTitle,
           projectLabel: newProjectLabel.isEmpty ? null : newProjectLabel,
           projectColor: newProjectColor,
+          clearProjectColor: newProjectColor == null,
           updatedAt: DateTime.now(),
         );
         if (_currentChat?.id == chat.id) {
@@ -3018,6 +4820,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _handleMultiDeletePressed() async {
+    final theme = Theme.of(context);
     if (!_isMultiDeleteMode) {
       setState(() {
         _isMultiDeleteMode = true;
@@ -3036,7 +4839,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Seçili sohbetleri gösteren ve onay isteyen bottom sheet aç
     await showModalBottomSheet(
       context: context,
-      backgroundColor: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
@@ -3062,15 +4865,17 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         height: 4,
                         margin: const EdgeInsets.only(bottom: 12),
                         decoration: BoxDecoration(
-                          color: Colors.white24,
+                          color: themeService.isDarkMode
+                              ? Colors.white24
+                              : Colors.black12,
                           borderRadius: BorderRadius.circular(2),
                         ),
                       ),
                     ),
-                    const Text(
+                    Text(
                       'Seçili sohbetleri silmek istiyor musun?',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: Theme.of(context).textTheme.bodyLarge?.color,
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
                       ),
@@ -3078,8 +4883,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     const SizedBox(height: 8),
                     Text(
                       '${selectedChats.length} sohbet seçildi. İstersen aşağıdan bazılarını kaldırabilirsin.',
-                      style: const TextStyle(
-                        color: Colors.white60,
+                      style: TextStyle(
+                        color: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.color?.withOpacity(0.7),
                         fontSize: 13,
                       ),
                     ),
@@ -3087,11 +4894,15 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     SizedBox(
                       height: 220,
                       child: selectedChats.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
                                 'Hiç sohbet seçili değil.',
                                 style: TextStyle(
-                                  color: Colors.white54,
+                                  color: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.color
+                                      ?.withOpacity(0.5),
                                   fontSize: 13,
                                 ),
                               ),
@@ -3105,16 +4916,24 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                     vertical: 4,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: themeService.isDarkMode ? const Color(0xFF222222) : Colors.grey.shade100,
+                                    color: themeService.isDarkMode
+                                        ? const Color(0xFF222222)
+                                        : Colors.grey.shade100,
                                     borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: themeService.isDarkMode ? Colors.white10 : Colors.black26),
+                                    border: Border.all(
+                                      color: themeService.isDarkMode
+                                          ? Colors.white10
+                                          : Colors.black26,
+                                    ),
                                   ),
                                   child: ListTile(
                                     dense: true,
                                     title: Text(
                                       chat.title,
                                       style: TextStyle(
-                                        color: themeService.isDarkMode ? Colors.white : Colors.black87,
+                                        color: themeService.isDarkMode
+                                            ? Colors.white
+                                            : Colors.black87,
                                         fontSize: 14,
                                       ),
                                       maxLines: 1,
@@ -3124,7 +4943,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                       icon: Icon(
                                         Icons.close,
                                         size: 18,
-                                        color: themeService.isDarkMode ? Colors.white60 : Colors.black54,
+                                        color: themeService.isDarkMode
+                                            ? Colors.white60
+                                            : Colors.black54,
                                       ),
                                       onPressed: () {
                                         setState(() {
@@ -3148,10 +4969,12 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           onPressed: () {
                             Navigator.of(ctx).pop();
                           },
-                          child: const Text(
+                          child: Text(
                             'İptal',
                             style: TextStyle(
-                              color: Colors.white70,
+                              color: Theme.of(
+                                context,
+                              ).textTheme.bodySmall?.color?.withOpacity(0.6),
                               fontSize: 13,
                             ),
                           ),
@@ -3255,6 +5078,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     setState(() {
       _currentChat = newChat;
+      _ephemeralMessages
+          .clear(); // Yeni sohbet başlayınca geçici mesajları temizle
     });
 
     return newChat;
@@ -3450,7 +5275,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final botMessage = Message(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
       chatId: targetChatId,
-      content: 'İnternetini kontrol edebilir misin? [Ayarlar](wifi://settings)\n\nİnternetin gelene kadar belki oyun oynayabilirsin? [Oyunlar](gamehub://)',
+      content:
+          'İnternetini kontrol edebilir misin? [Ayarlar](wifi://settings)\n\nİnternetin gelene kadar belki oyun oynayabilirsin? [Oyunlar](gamehub://)',
       isUser: false,
       timestamp: DateTime.now(),
     );
@@ -3538,7 +5364,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final memoryRegex = RegExp(r'^\s*\[BELLEK\]\s*:?\s*(.+)$');
     final promptRegex = RegExp(r'^\s*\[PROMPTS?\]\s*:?\s*(.+)$');
     final reminderRegex = RegExp(r'^\s*\[REMINDER\]\s*:?\s*(.+)$');
-    final imgenRegex = RegExp(r'^\s*\[İMGEN\]\s*:?\s*(.+)$');
+    final imgenRegex = RegExp(
+      r'^\s*\[İ?MGEN\]\s*:?\s*(.+)$',
+      caseSensitive: false,
+    );
     final reasonRegex = RegExp(r'^\s*\[REASON\]\s*:?\s*(.+)$');
     final calendarRegex = RegExp(r'^\[CALENDAR_EVENT\]: (.*)');
 
@@ -3703,14 +5532,22 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           trimmed.startsWith('[TERMINAL]') ||
           trimmed.startsWith('[STATUS]') ||
           trimmed.startsWith('[İMGEN]') ||
+          trimmed.startsWith('[IMGEN]') ||
           trimmed.startsWith('[REASON]') ||
           trimmed.startsWith('[AGENTİCMODE]') ||
+          trimmed.startsWith('[AGENTICMODE]') ||
           trimmed.startsWith('[TASKS]')) {
         continue;
       }
       filtered.add(line);
     }
-    return filtered.join('\n');
+    String result = filtered.join('\n');
+    // Multi-Answer etiketlerini global olarak temizle
+    result = result.replaceAll(
+      RegExp(r'\[\/?MULTI[-_]ANSWERS?\]', caseSensitive: false),
+      '',
+    );
+    return result;
   }
 
   String _stripDataImageMarkdown(String text) {
@@ -3726,8 +5563,32 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_currentChat == null) return;
     final targetChatId = _currentChat!.id;
 
+    String finalPrompt = prompt;
+
     // AI'ın kendisi prompt ürettiği için direkt üretim aşamasına geçiyoruz
+    // AMA: Eğer prompt çok kısa veya Türkçe kelimeler içeriyorsa "Prompt Engineering" yapalım.
     try {
+      bool needsEngineering =
+          prompt.length < 50 ||
+          prompt.contains(RegExp(r'[ığüşöçİĞÜŞÖÇ]')) ||
+          !prompt.contains(' ') ||
+          prompt.split(' ').length < 5;
+
+      if (needsEngineering) {
+        print('🪄 AI Promptu iyileştiriliyor: $prompt');
+        try {
+          final engineered = await _openRouterService.sendMessage(
+            "You are a master Prompt Engineer for Image Generation. Transform this raw AI input into a highly detailed, professional English prompt for cinematic generation: '$prompt'.\n"
+            "Return ONLY the English prompt text, no quotes or intro. Keep it under 400 characters.",
+          );
+          if (engineered.isNotEmpty && !engineered.contains('error')) {
+            finalPrompt = engineered.trim();
+          }
+        } catch (e) {
+          print('⚠️ Prompt iyileştirme başarısız, orijinali kullanılıyor: $e');
+        }
+      }
+
       // Eğer seçili bir görsel varsa onu referans olarak gönder
       String? refUrl;
       if (_selectedImagesBase64.isNotEmpty) {
@@ -3735,7 +5596,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
 
       final generatedImageBase64 = await _imageGenService
-          .generateImageWithFallback(prompt, referenceImageUrl: refUrl);
+          .generateImageWithFallback(finalPrompt, referenceImageUrl: refUrl);
 
       if (!mounted) return;
 
@@ -3763,6 +5624,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
         _isTyping = false;
         _isLoading = false;
+        _isGeneratingImage = false;
         _activeResponseChatId = null;
       });
 
@@ -3810,19 +5672,17 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _handleFsImport() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.any,
-      );
+      final result = await FilePicker.platform.pickFiles(type: FileType.any);
 
       if (result != null && result.files.single.path != null) {
         final file = File(result.files.single.path!);
-        
+
         // Sadece .fs dosyalarını kabul et
         if (!file.path.toLowerCase().endsWith('.fs')) {
           GreyNotification.show(context, 'Sadece .fs dosyaları kabul edilir');
           return;
         }
-        
+
         setState(() {
           _isLoading = true;
           _loadingMessage = 'Sohbet içe aktarılıyor...';
@@ -3843,7 +5703,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             await _storageService.saveChats(_chats);
             GreyNotification.show(context, 'Sohbet başarıyla içe aktarıldı');
           } else {
-            GreyNotification.show(context, 'Dosya bozuk veya şifresi çözülemedi');
+            GreyNotification.show(
+              context,
+              'Dosya bozuk veya şifresi çözülemedi',
+            );
           }
         } catch (e) {
           setState(() {
@@ -3868,6 +5731,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       GreyNotification.show(context, 'Dışa aktarılacak sohbet yok');
       return;
     }
+
+    if (!await _verifyLockIfNeeded(chat)) return;
 
     setState(() {
       _isExporting = true;
@@ -3909,6 +5774,8 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
 
+    if (!await _verifyLockIfNeeded(chat)) return;
+
     setState(() {
       _isLoading = true;
       _loadingMessage = '.fs dosyası oluşturuluyor...';
@@ -3942,34 +5809,51 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _handlePdfSelection() async {
+    if (_pickedPdfFiles.length >= 3) {
+      GreyNotification.show(context, 'En fazla 3 PDF ekleyebilirsiniz');
+      return;
+    }
+
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
+        allowMultiple: true,
       );
 
-      if (result != null && result.files.single.path != null) {
-        final file = File(result.files.single.path!);
+      if (result != null && result.files.isNotEmpty) {
+        final remainingSlots = 3 - _pickedPdfFiles.length;
+        final filesToAdd = result.files.take(remainingSlots).toList();
+
+        if (result.files.length > remainingSlots) {
+          GreyNotification.show(
+            context,
+            'Limit nedeniyle sadece $remainingSlots dosya eklendi',
+          );
+        }
 
         setState(() {
           _isLoading = true;
           _loadingMessage = 'PDF işleniyor...';
         });
 
-        // Extract text using read_pdf_text
         try {
-          final text = await ReadPdfText.getPDFtext(file.path);
+          for (var selectedFile in filesToAdd) {
+            if (selectedFile.path != null) {
+              final file = File(selectedFile.path!);
+              final bytes = await file.readAsBytes();
+              final base64String = base64Encode(bytes);
+
+              _pickedPdfFiles.add(file);
+              _pickedPdfBase64List.add(base64String);
+            }
+          }
 
           setState(() {
-            _pickedPdfFile = file;
-            _pickedPdfText = text;
             _isLoading = false;
           });
 
-          GreyNotification.show(
-            context,
-            'PDF eklendi: ${result.files.single.name}',
-          );
+          GreyNotification.show(context, 'PDF(ler) eklendi');
         } catch (e) {
           setState(() {
             _isLoading = false;
@@ -4130,7 +6014,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sendMessage() async {
+  Future<void> _sendMessage({String? customMessage}) async {
     // AI cevap verirken mesaj göndermeyi engelle
     if (_activeResponseChatId != null) {
       GreyNotification.show(
@@ -4140,7 +6024,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
 
-    String messageText = _messageController.text.trim();
+    String messageText = customMessage ?? _messageController.text.trim();
 
     // --- GRUP SOHBETİ KONTROLÜ ---
     if (_currentChat != null &&
@@ -4203,15 +6087,13 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     // ----------------------------
 
-    // PDF metni varsa ekle
-    if (_pickedPdfText != null && _pickedPdfText!.isNotEmpty) {
-      final pdfName =
-          _pickedPdfFile?.path.split(Platform.pathSeparator).last ??
-          'belge.pdf';
+    // PDF varsa görselleştir
+    if (_pickedPdfBase64List.isNotEmpty) {
+      final pdfNames = _pickedPdfFiles
+          .map((f) => f.path.split(Platform.pathSeparator).last)
+          .join(', ');
       final spacing = messageText.isEmpty ? '' : '\n\n';
-      messageText =
-          '[PDF: $pdfName]\n\n$messageText\n\n[PDF_CONTENT_START]\n$_pickedPdfText\n[PDF_CONTENT_END]'
-              .trim();
+      messageText = '[PDF: $pdfNames]$spacing$messageText'.trim();
     }
 
     setState(() {
@@ -4224,6 +6106,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Gönderilecek görsellerin base64 kopyasını, state'i temizlemeden önce al
     final List<String> imagesBase64ToSend = List<String>.from(
       _selectedImagesBase64,
+    );
+    final List<String> pdfsBase64ToSend = List<String>.from(
+      _pickedPdfBase64List,
     );
 
     // Görsel referansı yakala (Image Generation modu için)
@@ -4345,7 +6230,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           updatedAt: now,
           unreadCount: 0,
         );
-        _chats.insert(0, newChat);
+        if (!_isSecretMode) {
+          _chats.insert(0, newChat);
+        }
         _currentChat = newChat;
       }
 
@@ -4361,18 +6248,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       } else if (_isWebSearchMode) {
         _loadingMessage = 'Aranıyor...';
       } else {
-        _loadingMessage = 'Düşünüyor...';
+        _loadingMessage = 'thinking';
       }
 
-      // Mesaj gönderildiği anda inputtaki görselleri temizle
+      // Mesaj gönderildiği anda inputtaki dosyaları temizle
       _selectedImages.clear();
       _selectedImagesBase64.clear();
-      _pickedPdfFile = null;
-      _pickedPdfText = null;
+      _pickedPdfFiles.clear();
+      _pickedPdfBase64List.clear();
     });
 
     // Input metnini temizle ve en alta kaydır
-    _messageController.clear();
+    if (customMessage == null) _messageController.clear();
     _scrollToBottomQuick();
 
     try {
@@ -4545,11 +6432,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           }
         });
 
-        await _storageService.saveChats(_chats);
-        await _maybeGenerateChatTitle(targetChatId);
+        if (!_isSecretMode) {
+          await _storageService.saveChats(_chats);
+          await _maybeGenerateChatTitle(targetChatId);
+        }
 
         // Update stats
-        await _storageService.addUsageMinutes(1); // Add 1 minute for image generation
+        await _storageService.addUsageMinutes(1);
+        await _storageService.addChatUsageMinutes(targetChatId, 1);
         await _storageService.incrementTotalCodeLines(
           1,
         ); // Count image gen as 1 unit
@@ -4571,13 +6461,88 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           )
           .toList();
 
-      if (_isWebSearchMode) {
-        conversationHistory.add({
-          'role': 'system',
-          'content':
-              'Perform thorough web research to answer the user\'s request accurately. Provide sources when possible.',
-        });
+      if (_isRememberPastChatsEnabled) {
+        // Find most recent past messages from other chats
+        final otherChats = _chats
+            .where((c) => c.id != targetChatId && c.messages.isNotEmpty)
+            .toList();
+        if (otherChats.isNotEmpty) {
+          otherChats.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+          final lastChat = otherChats.first;
+          final pastMsgs = lastChat.messages.length > 3
+              ? lastChat.messages.sublist(lastChat.messages.length - 3)
+              : lastChat.messages;
+
+          final buffer = StringBuffer();
+          buffer.writeln(
+            'MEMORY: Information from the most recent previous conversation (Chat Title: "${lastChat.title}"):',
+          );
+          for (var m in pastMsgs) {
+            buffer.writeln('${m.isUser ? "User" : "AI"}: ${m.content}');
+          }
+
+          conversationHistory.insert(0, {
+            'role': 'system',
+            'content': buffer.toString().trim(),
+          });
+        }
       }
+
+      // --- Service Connection Context (Manus AI Style) ---
+      final bool isGmailConnected = GmailService.instance.isConnected();
+      final bool isGithubConnected = GitHubService.instance.isConnected();
+
+      final serviceContext = StringBuffer();
+      serviceContext.writeln('[SERVICE_CONTEXT]');
+      serviceContext.writeln(
+        'GMAIL_CONNECTED: $isGmailConnected (Allowed: $_isGmailAiAlwaysAllowed)',
+      );
+      serviceContext.writeln(
+        'GITHUB_CONNECTED: $isGithubConnected (Allowed: $_isGithubAiAlwaysAllowed)',
+      );
+      serviceContext.writeln();
+      serviceContext.writeln('INSTRUCTIONS:');
+      if (isGmailConnected && _isGmailAiAlwaysAllowed) {
+        serviceContext.writeln(
+          '- You can access Gmail. If the user wants to check emails or create drafts, use tools like `read_gmail_inbox` or `create_gmail_draft`. Be proactive. If you get a 403 error, explain that the user might need to enable the API or add themselves to Test Users.',
+        );
+      }
+      if (isGithubConnected && _isGithubAiAlwaysAllowed) {
+        serviceContext.writeln(
+          '- You can access GitHub. You can read repository files, list repositories, star/unstar repos, and view user/starred repos. Use `list_github_repos` to find repositories. Use `read_github_repo` to read files. Use `star_github_repo` to star. Be proactive like Manus AI.',
+        );
+      }
+      final isOutlookConnected = await _storageService.getIsOutlookConnected();
+      final isOutlookAllowed = await _storageService
+          .getIsOutlookAiAlwaysAllowed();
+      if (isOutlookConnected && isOutlookAllowed) {
+        serviceContext.writeln(
+          '- You can access Outlook. Use `read_outlook_inbox` to check emails and `send_outlook_email` to send emails.',
+        );
+      }
+      serviceContext.writeln(
+        '- If a service is connected but "Allowed" is false, politely ask the user to enable it from the attachment (paperclip) menu or settings if they want you to use it.',
+      );
+
+      conversationHistory.add({
+        'role': 'system',
+        'content': serviceContext.toString().trim(),
+      });
+
+      conversationHistory.add({
+        'role': 'system',
+        'content':
+            'ARTIFACTS (OPSİYONEL): Eğer bir kullanıcıya HTML, CSS veya JavaScript içeren ve görsel bir önizleme gerektiren (web sayfası, UI bileşeni, animasyon vb.) bir çıktı vereceksen Artifacts panelini kullanabilirsin. '
+            'Bu zorunlu değildir, sadece önizleme yapılmasının yararlı olacağı durumlarda kullan. BASİT KOD BLOKLARI İÇİN NORMAL MARKDOWN KULLAN. '
+            'Bir artifact başlatmak için şu sözdizimini kullan: [ARTIFACT title="Başlık" lang="html"] KOD [/ARTIFACT]. '
+            'Bu panel otomatik olarak açılacaktır. ASLA araç kullanımını (İMGEN, ARTIFACT vb.) önceden açıklama, doğrudan kullan.',
+      });
+
+      conversationHistory.add({
+        'role': 'system',
+        'content':
+            'Perform thorough web research to answer the user\'s request accurately. Provide sources when possible. IMPORTANT: If you decide to search or look for info, make sure to use relevant tool calls or reasoning. The user needs to see that you are searching.',
+      });
 
       // Kullanıcının mesajındaki @cbXlY referanslarına göre önceki kod bloklarını bağlam olarak ekle
       if (codeReferences.isNotEmpty) {
@@ -4621,17 +6586,42 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         });
       }
 
+      _messageController.clear();
+
       await _openRouterService.sendMessageWithHistoryStream(
         conversationHistory,
         messageText,
         imagesBase64: imagesBase64ToSend,
+        pdfsBase64: pdfsBase64ToSend,
         onToken: (token) {
           if (!mounted || _shouldStopResponse) return;
           if (token.isEmpty) return;
 
+          // Hız optimizasyonu: İlk token geldiğinde "thinking" veya "Aranıyor" gibi imleçleri kaldır
+          if (_loadingMessage != null && !_isGeneratingImage) {
+            _loadingMessage = null;
+          }
+
           streamedText += token;
           _fullResponseText = streamedText;
-          _currentTypingText = _cleanStreamingTextForDisplay(
+
+          final multiAnswerRegex = RegExp(
+            r'\[\/?MULTI[-_]ANSWERS?\]',
+            caseSensitive: false,
+          );
+          final bool hasMulti = multiAnswerRegex.hasMatch(streamedText);
+
+          if (hasMulti) {
+            _currentTypingText = 'Alternatif cevaplar hazırlanıyor...';
+          } else {
+            _currentTypingText = _cleanStreamingTextForDisplay(
+              _stripControlTagsForDisplay(streamedText),
+            );
+          }
+
+          // Initial cursors/messages are handled by derivedMessage creation in _sendMessage
+          // Hız optimizasyonu: localized updates via ValueNotifier
+          _streamingContent.value = _cleanStreamingTextForDisplay(
             _stripControlTagsForDisplay(streamedText),
           );
 
@@ -4644,6 +6634,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 messages[idx] = messages[idx].copyWith(
                   content: _currentTypingText,
                 );
+                _detectControlTagsStreaming(streamedText);
                 _chats[chatIndex] = _chats[chatIndex].copyWith(
                   messages: messages,
                   updatedAt: DateTime.now(),
@@ -4663,6 +6654,14 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         maxTokens: 4096,
         useReasoning: _isThinkingMode || _isWebSearchMode,
         reasoningEffort: 'low',
+        onToolCall: (name, args, id, isFinal) => _handleIncomingToolCall(
+          name,
+          args,
+          id,
+          aiMessageId,
+          targetChatId,
+          isFinal,
+        ),
       );
       // Streaming tamamlandıktan sonra cevabı temizle, kaynakları bağla ve
       // arka plandaysa bildirim gönder
@@ -4679,13 +6678,32 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         List<String>? alternatives;
         String finalContent = cleanText;
 
-        if (cleanText.contains('[MULTI_ANSWER]')) {
-          alternatives = cleanText
-              .split('[MULTI_ANSWER]')
+        // Multi-Answer handling - Using regex for robust detection and splitting (including closing tags)
+        final multiAnswerRegex = RegExp(
+          r'\[\/?MULTI[-_]ANSWERS?\]',
+          caseSensitive: false,
+        );
+        final bool hasMultiAnswer = multiAnswerRegex.hasMatch(withoutControl);
+
+        if (hasMultiAnswer) {
+          final parts = withoutControl
+              .split(multiAnswerRegex)
               .where((s) => s.trim().isNotEmpty)
               .toList();
-          if (alternatives.isNotEmpty) {
-            finalContent = alternatives.first;
+
+          if (parts.length >= 2) {
+            alternatives = parts
+                .map((p) => _cleanStreamingTextForDisplay(p))
+                .toList();
+            // Don't show the first answer yet, keep the 'Preparing' status in the bubble
+            finalContent = 'Bir cevap seçmek için panel bekleniyor...';
+
+            setState(() {
+              _isMultiAnswerPanelOpen = true;
+              _currentMultiAnswers = alternatives!;
+              _multiAnswerTargetMessageId = aiMessageId;
+              _multiAnswerTargetChatId = targetChatId;
+            });
           }
         }
 
@@ -4727,30 +6745,54 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         }
       }
 
-      // Streaming tamamlandıktan sonra durum bayraklarını sıfırla
-      setState(() {
-        _isLoading = false;
-        _isTyping = false;
-        _activeResponseChatId = null;
-        _typingMessageId = null;
-        _currentTypingText = '';
-        _fullResponseText = '';
-      });
+      // Streaming tamamlandıktan sonra durum bayraklarını sıfırla (eğer halen bir görsel üretilmiyorsa)
+      if (!_isGeneratingImage) {
+        setState(() {
+          _isLoading = false;
+          _isTyping = false;
+          _activeResponseChatId = null;
+          _typingMessageId = null;
+          _currentTypingText = '';
+          _fullResponseText = '';
+        });
+      } else {
+        // Görsel üretiliyorsa metinsel kısmı temizle ama loading'i koru
+        setState(() {
+          _typingMessageId = null;
+          _currentTypingText = 'Görsel oluşturuluyor...';
+          _fullResponseText = '';
+        });
+      }
 
-      await _storageService.saveChats(_chats);
-      await _maybeGenerateChatTitle(targetChatId);
+      // Statistics and title generation
+      if (!_isSecretMode) {
+        await _storageService.saveChats(_chats);
+        await _maybeGenerateChatTitle(targetChatId);
+      }
+      await _storageService.addUsageMinutes(1);
+      await _storageService.addChatUsageMinutes(targetChatId, 1);
 
-      // Update statistics
-      await _storageService.addUsageMinutes(1); // Add 1 minute for each message
-      
       // Count code lines in the response
       final codeBlocks = _collectCodeBlocksFromChat(_currentChat!);
-      final codeLines = codeBlocks.fold(0, (sum, block) => sum + block.code.split('\n').where((line) => line.trim().isNotEmpty).length);
+      final codeLines = codeBlocks.fold(
+        0,
+        (sum, block) =>
+            sum +
+            block.code
+                .split('\n')
+                .where((line) => line.trim().isNotEmpty)
+                .length,
+      );
       if (codeLines > 0) {
         await _storageService.incrementTotalCodeLines(codeLines);
-        await _storageService.updateLanguageUsage('Dart', codeLines); // Assuming Dart for code
+        await _storageService.updateLanguageUsage(
+          'Dart',
+          codeLines,
+        ); // Assuming Dart for code
       } else {
-        await _storageService.incrementTotalCodeLines(1); // Count as 1 code line for non-code messages
+        await _storageService.incrementTotalCodeLines(
+          1,
+        ); // Count as 1 code line for non-code messages
       }
     } catch (e) {
       print('❌ Mesaj gönderme hatası: $e');
@@ -4832,6 +6874,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (chatIndex == -1) return;
       final chat = _chats[chatIndex];
 
+      // --- Security Check ---
+      // Do not auto-generate titles for locked chats
+      if (chat.isLocked) return;
+      // ----------------------
+
       if (chat.messages.length < 2) return;
 
       final firstUser = chat.messages.firstWhere(
@@ -4846,7 +6893,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final isAutoTitle =
           currentTitle == 'Yeni Sohbet' || currentTitle == autoSnippet.trim();
 
-      if (!isAutoTitle) return;
+      if (!isAutoTitle && !_isAutoTitleEnabled) return;
 
       final buffer = StringBuffer();
       const int maxChars = 600;
@@ -4870,7 +6917,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final idx = _chats.indexWhere((c) => c.id == chatId);
         if (idx == -1) return;
         _chats[idx] = _chats[idx].copyWith(
-          title: newTitle,
+          title: newTitle.replaceAll('"', '').trim(),
           updatedAt: DateTime.now(),
         );
         if (_currentChat?.id == chatId) {
@@ -4884,9 +6931,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // Mesaj gönderilip gönderilemeyeceğini kontrol et
   bool _canSendMessage() {
-    final hasText = _messageController.text.trim().isNotEmpty;
-    final hasImages = _selectedImages.isNotEmpty;
-    return hasText || hasImages;
+    return _messageController.text.trim().isNotEmpty ||
+        _selectedImages.isNotEmpty ||
+        _pickedPdfFiles.isNotEmpty ||
+        _isRecordingVoice;
   }
 
   void _removeImage(int index) {
@@ -4971,59 +7019,414 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Colors.white,
+      backgroundColor: themeService.isDarkMode
+          ? const Color(0xFF1A1A1A)
+          : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
       builder: (ctx) {
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: Icon(Icons.photo_camera, color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                title: Text(
-                  'Kamera',
-                  style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                ),
-                onTap: () async {
-                  Navigator.of(ctx).pop();
-                  await _pickFromCamera();
-                },
+        return StatefulBuilder(
+          builder: (context, setStateSheet) {
+            return SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // --- GMAIL ---
+                  if (!GmailService.instance.isConnected())
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.google,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                        size: 20,
+                      ),
+                      title: Text(
+                        'Gmail bağla',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                      onTap: () async {
+                        Navigator.of(ctx).pop();
+                        _handleGmailLink();
+                      },
+                    )
+                  else
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.google,
+                        color: Colors.greenAccent, // Bağlıyken yeşil ikon
+                        size: 20,
+                      ),
+                      title: Text(
+                        'Gmail: ${_isGmailAiAlwaysAllowed ? "Aktif" : "Pasif"}',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      trailing: Switch(
+                        value: _isGmailAiAlwaysAllowed,
+                        activeColor: Colors.purpleAccent,
+                        onChanged: (val) async {
+                          setStateSheet(() {
+                            _isGmailAiAlwaysAllowed = val;
+                          });
+                          setState(() {
+                            _isGmailAiAlwaysAllowed = val;
+                          });
+                          await _storageService.setIsGmailAiAlwaysAllowed(val);
+                        },
+                      ),
+                    ),
+
+                  Divider(
+                    height: 1,
+                    color: themeService.isDarkMode
+                        ? Colors.white12
+                        : Colors.black12,
+                  ),
+
+                  // --- GITHUB ---
+                  if (!GitHubService.instance.isConnected())
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.github,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                        size: 20,
+                      ),
+                      title: Text(
+                        'GitHub bağla',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                      onTap: () async {
+                        Navigator.of(ctx).pop();
+                        _handleGitHubLink();
+                      },
+                    )
+                  else
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.github,
+                        color: Colors.greenAccent,
+                        size: 20,
+                      ),
+                      title: Text(
+                        'GitHub: ${_isGithubAiAlwaysAllowed ? "Aktif" : "Pasif"}',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      trailing: Switch(
+                        value: _isGithubAiAlwaysAllowed,
+                        activeColor: Colors.purpleAccent,
+                        onChanged: (val) async {
+                          setStateSheet(() {
+                            _isGithubAiAlwaysAllowed = val;
+                          });
+                          setState(() {
+                            _isGithubAiAlwaysAllowed = val;
+                          });
+                          await _storageService.setIsGithubAiAlwaysAllowed(val);
+                        },
+                      ),
+                    ),
+                  Divider(
+                    height: 1,
+                    color: themeService.isDarkMode
+                        ? Colors.white12
+                        : Colors.black12,
+                  ),
+
+                  // --- OUTLOOK ---
+                  if (!OutlookService.instance.isConnected())
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.microsoft,
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                        size: 20,
+                      ),
+                      title: Text(
+                        'Outlook bağla',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                        ),
+                      ),
+                      onTap: () async {
+                        Navigator.of(ctx).pop();
+                        _handleOutlookLink();
+                      },
+                    )
+                  else
+                    ListTile(
+                      leading: FaIcon(
+                        FontAwesomeIcons.microsoft,
+                        color: Colors.greenAccent,
+                        size: 20,
+                      ),
+                      title: Text(
+                        'Outlook: ${_isOutlookAiAlwaysAllowed ? "Aktif" : "Pasif"}',
+                        style: TextStyle(
+                          color: themeService.isDarkMode
+                              ? Colors.white
+                              : Colors.black87,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      trailing: Switch(
+                        value: _isOutlookAiAlwaysAllowed,
+                        activeColor: Colors.purpleAccent,
+                        onChanged: (val) async {
+                          setStateSheet(() {
+                            _isOutlookAiAlwaysAllowed = val;
+                          });
+                          setState(() {
+                            _isOutlookAiAlwaysAllowed = val;
+                          });
+                          await _storageService.setIsOutlookAiAlwaysAllowed(
+                            val,
+                          );
+                        },
+                      ),
+                    ),
+                  Divider(
+                    height: 1,
+                    color: themeService.isDarkMode
+                        ? Colors.white12
+                        : Colors.black12,
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.photo_camera,
+                      color: themeService.isDarkMode
+                          ? Colors.white
+                          : Colors.black87,
+                    ),
+                    title: Text(
+                      'Kamera',
+                      style: TextStyle(
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
+                    ),
+                    onTap: () async {
+                      Navigator.of(ctx).pop();
+                      await _pickFromCamera();
+                    },
+                  ),
+                  Divider(
+                    height: 1,
+                    color: themeService.isDarkMode
+                        ? Colors.white12
+                        : Colors.black12,
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      Icons.folder,
+                      color: themeService.isDarkMode
+                          ? Colors.white
+                          : Colors.black87,
+                    ),
+                    title: Text(
+                      'Dosyalar',
+                      style: TextStyle(
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
+                    ),
+                    onTap: () async {
+                      Navigator.of(ctx).pop();
+                      await _pickFromFiles();
+                    },
+                  ),
+                  Divider(
+                    height: 1,
+                    color: themeService.isDarkMode
+                        ? Colors.white12
+                        : Colors.black12,
+                  ),
+                  ListTile(
+                    leading: FaIcon(
+                      FontAwesomeIcons.filePdf,
+                      color: themeService.isDarkMode
+                          ? Colors.white
+                          : Colors.black87,
+                      size: 20,
+                    ),
+                    title: Text(
+                      'PDF Seç',
+                      style: TextStyle(
+                        color: themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87,
+                      ),
+                    ),
+                    onTap: () async {
+                      Navigator.of(ctx).pop();
+                      await _handlePdfSelection();
+                    },
+                  ),
+                  // ... (other items)
+                ],
               ),
-              Divider(height: 1, color: themeService.isDarkMode ? Colors.white12 : Colors.black12),
-              ListTile(
-                leading: Icon(Icons.folder, color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                title: Text(
-                  'Dosyalar',
-                  style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                ),
-                onTap: () async {
-                  Navigator.of(ctx).pop();
-                  await _pickFromFiles();
-                },
-              ),
-              Divider(height: 1, color: themeService.isDarkMode ? Colors.white12 : Colors.black12),
-              ListTile(
-                leading: FaIcon(
-                  FontAwesomeIcons.filePdf,
-                  color: themeService.isDarkMode ? Colors.white : Colors.black87,
-                  size: 20,
-                ),
-                title: Text(
-                  'PDF Seç',
-                  style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
-                ),
-                onTap: () async {
-                  Navigator.of(ctx).pop();
-                  await _handlePdfSelection();
-                },
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
+  }
+
+  Future<void> _handleGmailLink() async {
+    final success = await _gmailService.signIn();
+    if (success) {
+      setState(() {});
+      GreyNotification.show(context, 'Gmail başarıyla bağlandı!');
+    } else {
+      GreyNotification.show(context, 'Gmail bağlantısı başarısız oldu.');
+    }
+  }
+
+  Future<void> _handleGitHubLink() async {
+    final success = await _githubService.authenticate();
+    if (success) {
+      setState(() {});
+      GreyNotification.show(context, 'GitHub başarıyla bağlandı!');
+    } else {
+      GreyNotification.show(context, 'GitHub bağlantısı başarısız oldu.');
+    }
+  }
+
+  Future<void> _handleOutlookLink() async {
+    final success = await OutlookService.instance.authenticate();
+    if (success) {
+      setState(() {});
+      GreyNotification.show(context, 'Outlook başarıyla bağlandı!');
+    } else {
+      GreyNotification.show(context, 'Outlook bağlantısı başarısız oldu.');
+    }
+  }
+
+  void _showUndoToast(String title, VoidCallback onUndo) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: themeService.isDarkMode
+            ? const Color(0xFF1E1E1E)
+            : Colors.white,
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        content: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Mail gönderildi: $title',
+                style: TextStyle(
+                  color: themeService.isDarkMode
+                      ? Colors.white
+                      : Colors.black87,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: () {
+                onUndo();
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              },
+              child: const Text(
+                'Geri al',
+                style: TextStyle(color: Colors.blueAccent),
+              ),
+            ),
+            IconButton(
+              icon: Icon(
+                Icons.close,
+                size: 18,
+                color: themeService.isDarkMode
+                    ? Colors.white54
+                    : Colors.black54,
+              ),
+              onPressed: () =>
+                  ScaffoldMessenger.of(context).hideCurrentSnackBar(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _handleToolApproval(
+    Message message,
+    Map<String, dynamic> toolData,
+  ) async {
+    final toolName = toolData['toolCallName']; // e.g., 'create_gmail_draft'
+    final title = toolData['title'] ?? 'İşlem';
+
+    if (toolName == 'create_gmail_draft') {
+      final args = toolData['args'] ?? {};
+
+      // 1. Önce UI'da "Onaylandı" durumuna çekelim
+      setState(() {
+        final chatIndex = _chats.indexWhere((c) => c.id == _currentChat?.id);
+        if (chatIndex != -1) {
+          final messages = [..._chats[chatIndex].messages];
+          final idx = messages.indexWhere((m) => m.id == message.id);
+          if (idx != -1) {
+            final currentMetadata = Map<String, dynamic>.from(
+              messages[idx].metadata ?? {},
+            );
+            final currentTool = Map<String, dynamic>.from(
+              currentMetadata['toolCall'] ?? {},
+            );
+            currentTool['status'] = 'draft_approved';
+            currentTool['showApprove'] = false;
+            currentMetadata['toolCall'] = currentTool;
+
+            messages[idx] = messages[idx].copyWith(metadata: currentMetadata);
+            _chats[chatIndex] = _chats[chatIndex].copyWith(messages: messages);
+            _currentChat = _chats[chatIndex];
+          }
+        }
+      });
+      await _storageService.saveChats(_chats);
+
+      // 2. Gerçek gönderim işlemini yap (GmailService)
+      try {
+        await _gmailService.sendEmail(
+          to: args['to'] ?? '',
+          subject: args['subject'] ?? '',
+          body: args['body'] ?? '',
+        );
+        GreyNotification.show(context, 'Mail başarıyla gönderildi');
+      } catch (e) {
+        GreyNotification.show(context, 'Mail gönderilemedi: $e');
+      }
+
+      _showUndoToast(title, () {
+        GreyNotification.show(context, 'İşlem geri alınamaz (Mail gönderildi)');
+      });
+    }
   }
 
   Future<void> _pickFromFiles() async {
@@ -5100,7 +7503,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _startVoiceRecording() async {
+  Future<void> _startVoiceRecording({bool isManual = false}) async {
     if (_isLoading || _activeResponseChatId != null) {
       GreyNotification.show(
         context,
@@ -5110,6 +7513,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     if (_isRecordingVoice) return;
 
+    _isManualRecording = isManual;
     final initialText = _messageController.text;
     final success = await _speechService.startListening(
       onText: (text) {
@@ -5132,15 +7536,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _recordLevel = level;
         });
 
+        // Manuel modda (basılı tutma) otomatik durdurma yok
+        if (_isManualRecording) return;
+
         // Sessizlik tespiti: seviye çok düşükse zamanlayıcı başlat, tekrar yükselirse iptal et
         const double silenceThreshold =
             0.08; // 0-1 arası; çok küçük sesleri sessizlik say
-        const Duration silenceDuration = Duration(milliseconds: 1200);
+        const Duration silenceDuration = Duration(milliseconds: 1500);
 
         if (level < silenceThreshold) {
           _silenceTimer?.cancel();
           _silenceTimer = Timer(silenceDuration, () {
-            if (mounted && _isRecordingVoice) {
+            if (mounted && _isRecordingVoice && !_isManualRecording) {
               _stopVoiceRecording();
             }
           });
@@ -5151,7 +7558,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       },
       onError: (message) {
         if (!mounted) return;
-        GreyNotification.show(context, 'STT hatası: $message');
+        String userFriendlyMessage = 'Ses kaydı hatası';
+        if (message.toLowerCase().contains('timeout')) {
+          userFriendlyMessage = 'Ses algılanamadı, zaman aşımı';
+        } else if (message.toLowerCase().contains('no match')) {
+          userFriendlyMessage = 'Ses anlaşılamadı, lütfen tekrar deneyin';
+        } else if (message.toLowerCase().contains('busy')) {
+          userFriendlyMessage = 'Ses servisi meşgul, lütfen bekleyin';
+        } else if (message.toLowerCase().contains('not authorized')) {
+          userFriendlyMessage = 'Mikrofon izni verilmemiş';
+        }
+        GreyNotification.show(context, userFriendlyMessage);
+        _stopVoiceRecording();
       },
     );
 
@@ -5179,6 +7597,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       _isRecordingVoice = false;
+      _isManualRecording = false;
       _recordLevel = 0.0;
     });
   }
@@ -5249,7 +7668,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     margin: const EdgeInsets.only(bottom: 12),
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     decoration: BoxDecoration(
-                      color: themeService.isDarkMode 
+                      color: themeService.isDarkMode
                           ? const Color(0xFF1A1A1A)
                           : Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(16),
@@ -5274,6 +7693,30 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           label: 'Görsel oluştur',
                           onTap: _toggleImageGenerationMode,
                           isActive: _isImageGenerationMode,
+                        ),
+                        _buildActionMenuItem(
+                          icon: FontAwesomeIcons.google,
+                          label: GmailService.instance.isConnected()
+                              ? 'Gmail (Bağlı)'
+                              : 'Gmail\'e Bağlan',
+                          onTap: _handleGmailLink,
+                          isActive: GmailService.instance.isConnected(),
+                        ),
+                        _buildActionMenuItem(
+                          icon: FontAwesomeIcons.github,
+                          label: GitHubService.instance.isConnected()
+                              ? 'GitHub (Bağlı)'
+                              : 'GitHub\'a Bağlan',
+                          onTap: _handleGitHubLink,
+                          isActive: GitHubService.instance.isConnected(),
+                        ),
+                        _buildActionMenuItem(
+                          icon: FontAwesomeIcons.microsoft,
+                          label: OutlookService.instance.isConnected()
+                              ? 'Outlook (Bağlı)'
+                              : 'Outlook\'a Bağlan',
+                          onTap: _handleOutlookLink,
+                          isActive: OutlookService.instance.isConnected(),
                         ),
                       ],
                     ),
@@ -5307,7 +7750,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isImageGenerationMode
                                     ? Colors.blue
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black26),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black26),
                                 width: 1,
                               ),
                             ),
@@ -5319,7 +7764,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isImageGenerationMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                                 if (_isImageGenerationMode) ...[
                                   const SizedBox(width: 6),
@@ -5354,7 +7801,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isWebSearchMode
                                     ? Colors.green
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black26),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black26),
                                 width: 1,
                               ),
                             ),
@@ -5366,12 +7815,44 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isWebSearchMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                               ],
                             ),
                           ),
                         ),
+                        // Scroll to Bottom Arrow
+                        if (_showScrollToBottom) ...[
+                          const SizedBox(width: 178),
+                          GestureDetector(
+                            onTap: _scrollToBottom,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: themeService.isDarkMode
+                                    ? Colors.white10
+                                    : Colors.black.withOpacity(0.05),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: themeService.isDarkMode
+                                      ? Colors.white24
+                                      : Colors.black26,
+                                  width: 1,
+                                ),
+                              ),
+                              child: FaIcon(
+                                FontAwesomeIcons.arrowDown,
+                                size: 14,
+                                color: themeService.isDarkMode
+                                    ? Colors.white70
+                                    : Colors.black54,
+                              ),
+                            ),
+                          ),
+                        ],
                       ] else ...[
                         // Normal Chat Tools (Existing)
                         // Görsel oluştur
@@ -5391,7 +7872,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isImageGenerationMode
                                     ? Colors.blue
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black26),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black26),
                                 width: 1,
                               ),
                             ),
@@ -5403,7 +7886,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isImageGenerationMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                                 if (_isImageGenerationMode) ...[
                                   const SizedBox(width: 6),
@@ -5438,7 +7923,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isWebSearchMode
                                     ? Colors.blue
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black54),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black54),
                                 width: 1,
                               ),
                             ),
@@ -5450,7 +7937,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isWebSearchMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                                 if (_isWebSearchMode) ...[
                                   const SizedBox(width: 6),
@@ -5485,7 +7974,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isCanvasMode
                                     ? Colors.blue
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black26),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black26),
                                 width: 1,
                               ),
                             ),
@@ -5497,7 +7988,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isCanvasMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                                 if (_isCanvasMode) ...[
                                   const SizedBox(width: 6),
@@ -5532,7 +8025,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               border: Border.all(
                                 color: _isThinkingMode
                                     ? Colors.blue
-                                    : (themeService.isDarkMode ? Colors.white24 : Colors.black26),
+                                    : (themeService.isDarkMode
+                                          ? Colors.white24
+                                          : Colors.black26),
                                 width: 1,
                               ),
                             ),
@@ -5544,7 +8039,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   size: 16,
                                   color: _isThinkingMode
                                       ? Colors.white
-                                      : (themeService.isDarkMode ? Colors.white54 : Colors.black54),
+                                      : (themeService.isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54),
                                 ),
                                 if (_isThinkingMode) ...[
                                   const SizedBox(width: 6),
@@ -5561,6 +8058,36 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             ),
                           ),
                         ),
+                        // Scroll to Bottom Arrow
+                        if (_showScrollToBottom) ...[
+                          const SizedBox(width: 178),
+                          GestureDetector(
+                            onTap: _scrollToBottom,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: themeService.isDarkMode
+                                    ? Colors.white10
+                                    : Colors.black.withOpacity(0.05),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: themeService.isDarkMode
+                                      ? Colors.white24
+                                      : Colors.black26,
+                                  width: 1,
+                                ),
+                              ),
+                              child: FaIcon(
+                                FontAwesomeIcons.arrowDown,
+                                size: 14,
+                                color: themeService.isDarkMode
+                                    ? Colors.white70
+                                    : Colors.black54,
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ],
                   ),
@@ -5602,7 +8129,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                       controller: _messageController,
                                       focusNode: _messageFocusNode,
                                       style: TextStyle(
-                                        color: themeService.isDarkMode ? Colors.white : Colors.black87,
+                                        color: themeService.isDarkMode
+                                            ? Colors.white
+                                            : Colors.black87,
                                         // Aktif modlar için özel renk
                                         decorationColor:
                                             _isImageGenerationMode ||
@@ -5610,7 +8139,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                                 _isCanvasMode ||
                                                 _isThinkingMode
                                             ? Colors.blue
-                                            : (themeService.isDarkMode ? Colors.white : Colors.black87),
+                                            : (themeService.isDarkMode
+                                                  ? Colors.white
+                                                  : Colors.black87),
                                       ),
                                       decoration: InputDecoration(
                                         hintText: _isImageGenerationMode
@@ -5622,17 +8153,22 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                             : _isThinkingMode
                                             ? 'Daha derin bir cevap isteyin...'
                                             : (_currentChat == null ||
-                                                      _currentChat!.messages.isEmpty
+                                                      _currentChat!
+                                                          .messages
+                                                          .isEmpty
                                                   ? 'ForeSee\'e bir şey sor...'
                                                   : 'Mesajınızı yazın...'),
                                         hintStyle: TextStyle(
-                                          color: themeService.isDarkMode ? Colors.white54 : Colors.black87,
+                                          color: themeService.isDarkMode
+                                              ? Colors.white54
+                                              : Colors.black87,
                                         ),
                                         border: InputBorder.none,
-                                        contentPadding: const EdgeInsets.symmetric(
-                                          horizontal: 16,
-                                          vertical: 4,
-                                        ),
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                              horizontal: 16,
+                                              vertical: 4,
+                                            ),
                                       ),
                                       minLines: 1,
                                       maxLines: 5,
@@ -5656,146 +8192,264 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                               size: 16,
                                             ),
                                           ),
-                                          color: themeService.isDarkMode ? Colors.white70 : Colors.black87,
+                                          color: themeService.isDarkMode
+                                              ? Colors.white70
+                                              : Colors.black87,
                                           onPressed: _pickImage,
                                         ),
-                                      if (_pickedPdfFile != null) ...[
-                                        Container(
-                                          margin: const EdgeInsets.only(right: 8),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 12,
-                                            vertical: 8,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: themeService.isDarkMode ? Colors.red.withOpacity(0.1) : Colors.red.withOpacity(0.05),
-                                            borderRadius: BorderRadius.circular(8),
-                                            border: Border.all(color: themeService.isDarkMode ? Colors.red.withOpacity(0.3) : Colors.red.withOpacity(0.2)),
-                                          ),
-                                          child: Row(
-                                            mainAxisSize: MainAxisSize.min,
+                                      Expanded(
+                                        child: SizedBox(
+                                          height: 40,
+                                          child: ListView(
+                                            scrollDirection: Axis.horizontal,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 4,
+                                            ),
                                             children: [
-                                              const Icon(
-                                                Icons.picture_as_pdf,
-                                                color: Colors.red,
-                                                size: 16,
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Flexible(
-                                                child: Text(
-                                                  _pickedPdfFile!.path
-                                                      .split(Platform.pathSeparator)
-                                                      .last,
-                                                  style: TextStyle(
-                                                    color: themeService.isDarkMode ? Colors.white : Colors.black87,
-                                                    fontSize: 13,
+                                              // PDF Chips
+                                              ...List.generate(_pickedPdfFiles.length, (
+                                                index,
+                                              ) {
+                                                final pdfFile =
+                                                    _pickedPdfFiles[index];
+                                                final pdfName = pdfFile.path
+                                                    .split(
+                                                      Platform.pathSeparator,
+                                                    )
+                                                    .last;
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        right: 8.0,
+                                                      ),
+                                                  child: Container(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 10,
+                                                          vertical: 6,
+                                                        ),
+                                                    decoration: BoxDecoration(
+                                                      color:
+                                                          themeService
+                                                              .isDarkMode
+                                                          ? Colors.red
+                                                                .withOpacity(
+                                                                  0.1,
+                                                                )
+                                                          : Colors.red
+                                                                .withOpacity(
+                                                                  0.05,
+                                                                ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            20,
+                                                          ),
+                                                      border: Border.all(
+                                                        color:
+                                                            themeService
+                                                                .isDarkMode
+                                                            ? Colors.red
+                                                                  .withOpacity(
+                                                                    0.3,
+                                                                  )
+                                                            : Colors.red
+                                                                  .withOpacity(
+                                                                    0.2,
+                                                                  ),
+                                                      ),
+                                                    ),
+                                                    child: Row(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      children: [
+                                                        const Icon(
+                                                          Icons.picture_as_pdf,
+                                                          color: Colors.red,
+                                                          size: 14,
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 6,
+                                                        ),
+                                                        ConstrainedBox(
+                                                          constraints:
+                                                              const BoxConstraints(
+                                                                maxWidth: 400,
+                                                              ),
+                                                          child: Text(
+                                                            pdfName,
+                                                            style: TextStyle(
+                                                              color:
+                                                                  themeService
+                                                                      .isDarkMode
+                                                                  ? Colors.white
+                                                                  : Colors
+                                                                        .black87,
+                                                              fontSize: 12,
+                                                            ),
+                                                            maxLines: 1,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(
+                                                          width: 4,
+                                                        ),
+                                                        GestureDetector(
+                                                          onTap: () {
+                                                            setState(() {
+                                                              _pickedPdfFiles
+                                                                  .removeAt(
+                                                                    index,
+                                                                  );
+                                                              _pickedPdfBase64List
+                                                                  .removeAt(
+                                                                    index,
+                                                                  );
+                                                            });
+                                                          },
+                                                          child: Icon(
+                                                            Icons.close,
+                                                            color:
+                                                                themeService
+                                                                    .isDarkMode
+                                                                ? Colors.white54
+                                                                : Colors
+                                                                      .black54,
+                                                            size: 14,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
                                                   ),
-                                                  maxLines: 1,
-                                                  overflow: TextOverflow.ellipsis,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              GestureDetector(
-                                                onTap: () {
-                                                  setState(() {
-                                                    _pickedPdfFile = null;
-                                                    _pickedPdfText = null;
-                                                  });
-                                                },
-                                                child: Icon(
-                                                  Icons.close,
-                                                  color: themeService.isDarkMode ? Colors.white54 : Colors.black54,
-                                                  size: 18,
-                                                ),
-                                              ),
+                                                );
+                                              }),
+
+                                              // Image Chips
+                                              ...List.generate(_selectedImages.length, (
+                                                index,
+                                              ) {
+                                                final file =
+                                                    _selectedImages[index];
+                                                return Padding(
+                                                  padding:
+                                                      const EdgeInsets.only(
+                                                        right: 7.0,
+                                                      ),
+                                                  child: GestureDetector(
+                                                    onTap: () =>
+                                                        _previewSelectedImage(
+                                                          index,
+                                                        ),
+                                                    child: Stack(
+                                                      children: [
+                                                        Hero(
+                                                          tag:
+                                                              'selected_input_image_$index',
+                                                          child: ClipRRect(
+                                                            borderRadius:
+                                                                BorderRadius.circular(
+                                                                  8,
+                                                                ),
+                                                            child: Image.file(
+                                                              File(file.path),
+                                                              width: 40,
+                                                              height: 40,
+                                                              fit: BoxFit.cover,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        Positioned(
+                                                          top: 2,
+                                                          right: 2,
+                                                          child: GestureDetector(
+                                                            onTap: () {
+                                                              setState(() {
+                                                                _selectedImages
+                                                                    .removeAt(
+                                                                      index,
+                                                                    );
+                                                              });
+                                                            },
+                                                            child: Container(
+                                                              width: 16,
+                                                              height: 16,
+                                                              decoration: BoxDecoration(
+                                                                color:
+                                                                    themeService
+                                                                        .isDarkMode
+                                                                    ? Colors
+                                                                          .black54
+                                                                    : Colors
+                                                                          .black26,
+                                                                shape: BoxShape
+                                                                    .circle,
+                                                              ),
+                                                              child: Icon(
+                                                                Icons.close,
+                                                                color:
+                                                                    themeService
+                                                                        .isDarkMode
+                                                                    ? Colors
+                                                                          .white
+                                                                    : Colors
+                                                                          .black87,
+                                                                size: 12,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                );
+                                              }),
                                             ],
                                           ),
                                         ),
-                                      ],
-                                      if (_selectedImages.isNotEmpty) ...[
-                                        SizedBox(
-                                          height: 40,
-                                          child: ListView.separated(
-                                            scrollDirection: Axis.horizontal,
-                                            itemCount: _selectedImages.length,
-                                            separatorBuilder: (_, __) =>
-                                                const SizedBox(width: 7),
-                                            itemBuilder: (context, index) {
-                                              final file = _selectedImages[index];
-                                              return GestureDetector(
-                                                onTap: () =>
-                                                    _previewSelectedImage(index),
-                                                child: Stack(
-                                                  children: [
-                                                    Hero(
-                                                      tag:
-                                                          'selected_input_image_$index',
-                                                      child: ClipRRect(
-                                                        borderRadius:
-                                                            BorderRadius.circular(8),
-                                                        child: Image.file(
-                                                          File(file.path),
-                                                          width: 40,
-                                                          height: 40,
-                                                          fit: BoxFit.cover,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    Positioned(
-                                                      top: 2,
-                                                      right: 2,
-                                                      child: GestureDetector(
-                                                        onTap: () {
-                                                          setState(() {
-                                                            _selectedImages
-                                                                .removeAt(index);
-                                                          });
-                                                        },
-                                                        child: Container(
-                                                          width: 16,
-                                                          height: 16,
-                                                          decoration: BoxDecoration(
-                                                            color: themeService.isDarkMode ? Colors.black54 : Colors.black26,
-                                                            shape: BoxShape.circle,
-                                                          ),
-                                                          child: Icon(
-                                                            Icons.close,
-                                                            color: themeService.isDarkMode ? Colors.white : Colors.black87,
-                                                            size: 12,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              );
-                                            },
+                                      ),
+                                      // Hybrid Mic button
+                                      GestureDetector(
+                                        onTap: () {
+                                          if (_isRecordingVoice) {
+                                            _stopVoiceRecording();
+                                          } else {
+                                            _startVoiceRecording(
+                                              isManual: false,
+                                            ); // Auto mode
+                                          }
+                                        },
+                                        onLongPressStart: (_) {
+                                          if (!_isRecordingVoice) {
+                                            _startVoiceRecording(
+                                              isManual: true,
+                                            ); // Manual mode
+                                          }
+                                        },
+                                        onLongPressEnd: (_) {
+                                          if (_isRecordingVoice &&
+                                              _isManualRecording) {
+                                            _stopVoiceRecording();
+                                          }
+                                        },
+                                        child: Padding(
+                                          padding: const EdgeInsets.only(
+                                            left: 8,
+                                            right: 12,
+                                            top: 8,
+                                            bottom: 8,
                                           ),
-                                        ),
-                                      ],
-                                      const Spacer(),
-                                      // Mic button
-                                      if (_isRecordingVoice)
-                                        IconButton(
-                                          onPressed: _stopVoiceRecording,
-                                          icon: const FaIcon(
+                                          child: FaIcon(
                                             FontAwesomeIcons.microphone,
                                             size: 16,
-                                            color: Colors.redAccent,
+                                            color: _isRecordingVoice
+                                                ? Colors.redAccent
+                                                : (themeService.isDarkMode
+                                                      ? Colors.white70
+                                                      : Colors.black87),
                                           ),
-                                          constraints: const BoxConstraints(),
-                                          padding: const EdgeInsets.all(8),
                                         ),
-                                      if (!_isRecordingVoice)
-                                        IconButton(
-                                          onPressed: _startVoiceRecording,
-                                          icon: FaIcon(
-                                            FontAwesomeIcons.microphone,
-                                            size: 16,
-                                            color: themeService.isDarkMode ? Colors.white70 : Colors.black87,
-                                          ),
-                                          constraints: const BoxConstraints(),
-                                          padding: const EdgeInsets.all(8),
-                                        ),
+                                      ),
                                       // Send button
                                       Container(
                                         width: 40,
@@ -5804,10 +8458,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                           color: _isLoading
                                               ? Colors.red
                                               : (_canSendMessage()
-                                                    ? (themeService.isDarkMode ? Colors.white : Colors.black)
+                                                    ? (themeService.isDarkMode
+                                                          ? Colors.white
+                                                          : Colors.black)
                                                     : (themeService.isDarkMode
-                                                          ? Colors.white.withOpacity(0.3)
-                                                          : Colors.black.withOpacity(0.3))),
+                                                          ? Colors.white
+                                                                .withOpacity(
+                                                                  0.3,
+                                                                )
+                                                          : Colors.black
+                                                                .withOpacity(
+                                                                  0.3,
+                                                                ))),
                                           shape: BoxShape.circle,
                                         ),
                                         child: IconButton(
@@ -5833,8 +8495,18 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                                   FontAwesomeIcons.arrowUp,
                                                   size: 16,
                                                   color: _canSendMessage()
-                                                      ? (themeService.isDarkMode ? Colors.black : Colors.white)
-                                                      : (themeService.isDarkMode ? Colors.black.withOpacity(0.5) : Colors.white.withOpacity(0.5)),
+                                                      ? (themeService.isDarkMode
+                                                            ? Colors.black
+                                                            : Colors.white)
+                                                      : (themeService.isDarkMode
+                                                            ? Colors.black
+                                                                  .withOpacity(
+                                                                    0.5,
+                                                                  )
+                                                            : Colors.white
+                                                                  .withOpacity(
+                                                                    0.5,
+                                                                  )),
                                                 ),
                                           constraints: const BoxConstraints(),
                                           padding: EdgeInsets.zero,
@@ -5859,7 +8531,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       ],
     );
-}
+  }
 
   Widget _buildActionMenuItem({
     required IconData icon,
@@ -5877,13 +8549,21 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               width: 32,
               height: 32,
               decoration: BoxDecoration(
-                color: isActive ? Colors.blue : (themeService.isDarkMode ? const Color(0xFF2A2A2A) : Colors.grey.shade300),
+                color: isActive
+                    ? Colors.blue
+                    : (themeService.isDarkMode
+                          ? const Color(0xFF2A2A2A)
+                          : Colors.grey.shade300),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Center(
                 child: FaIcon(
                   icon,
-                  color: isActive ? Colors.white : (themeService.isDarkMode ? Colors.white : Colors.black87),
+                  color: isActive
+                      ? Colors.white
+                      : (themeService.isDarkMode
+                            ? Colors.white
+                            : Colors.black87),
                   size: 16,
                 ),
               ),
@@ -5892,7 +8572,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             Text(
               label,
               style: TextStyle(
-                color: isActive ? Colors.blue : (themeService.isDarkMode ? Colors.white : Colors.black87),
+                color: isActive
+                    ? Colors.blue
+                    : (themeService.isDarkMode ? Colors.white : Colors.black87),
                 fontSize: 15,
                 fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
               ),
@@ -5905,6 +8587,17 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _loadInitialSettings() async {
     _isSmartContextEnabled = await _storageService.getIsSmartContextEnabled();
+    _isRememberPastChatsEnabled = await _storageService
+        .getIsRememberPastChatsEnabled();
+    _isAutoTitleEnabled = await _storageService.getIsAutoTitleEnabled();
+    _notificationsEnabled = await _storageService.getNotificationsEnabled();
+    _fontSizeIndex = await _storageService.getFontSizeIndex();
+    _fontFamily = await _storageService.getFontFamily();
+    _isGmailAiAlwaysAllowed = await _storageService.getIsGmailAiAlwaysAllowed();
+    _isGithubAiAlwaysAllowed = await _storageService
+        .getIsGithubAiAlwaysAllowed();
+    _isOutlookAiAlwaysAllowed = await _storageService
+        .getIsOutlookAiAlwaysAllowed();
     setState(() {});
   }
 
@@ -5936,7 +8629,7 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       messages[msgIndex] = messages[msgIndex].copyWith(
         content: message.alternatives![index],
         displayAlternativeIndex: index,
-        alternatives: null, // Seçim yapıldıktan sonra alternatifleri temizle
+        // Seçim yapıldıktan sonra alternatifleri silmiyoruz ki oklarla değiştirilebilsin
       );
 
       _chats[chatIndex] = _chats[chatIndex].copyWith(messages: messages);
@@ -6433,7 +9126,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   backgroundColor: isAI ? Colors.white : Colors.blueGrey,
                   backgroundImage: member['profilePhotoUrl'] != null
                       ? NetworkImage(member['profilePhotoUrl'])
-                      : (isAI ? AssetImage(themeService.getLogoPath('logo3.png')) : null)
+                      : (isAI
+                                ? AssetImage(
+                                    themeService.getLogoPath('logo3.png'),
+                                  )
+                                : null)
                             as ImageProvider?,
                   child: (member['profilePhotoUrl'] == null && !isAI)
                       ? Text(
@@ -6567,11 +9264,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             return StatefulBuilder(
               builder: (context, setState) {
                 return AlertDialog(
-                  backgroundColor: theme.dialogBackgroundColor,
+                  backgroundColor: Theme.of(context).dialogBackgroundColor,
                   title: Text(
                     'ForeSee Online',
                     style: TextStyle(
-                      color: theme.textTheme.titleLarge?.color,
+                      color: Theme.of(context).textTheme.titleLarge?.color,
                       fontWeight: FontWeight.bold,
                     ),
                   ),
@@ -6581,9 +9278,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       Text(
                         'Her grupta gözükcek olan sana özel kullanıcı adını belirle',
                         style: TextStyle(
-                          color: theme.textTheme.bodyMedium?.color?.withOpacity(
-                            0.7,
-                          ),
+                          color: Theme.of(
+                            context,
+                          ).textTheme.bodyMedium?.color?.withOpacity(0.7),
                           fontSize: 13,
                         ),
                       ),
@@ -6591,21 +9288,26 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       TextField(
                         controller: controller,
                         style: TextStyle(
-                          color: theme.textTheme.bodyMedium?.color,
+                          color: Theme.of(context).textTheme.bodyMedium?.color,
                           fontWeight: FontWeight.w500,
                         ),
                         decoration: InputDecoration(
                           hintText: 'Kullanıcı Adı',
                           hintStyle: TextStyle(
-                            color: theme.textTheme.bodySmall?.color
-                                ?.withOpacity(0.4),
+                            color: Theme.of(
+                              context,
+                            ).textTheme.bodySmall?.color?.withOpacity(0.4),
                           ),
                           errorText: errorText,
                           enabledBorder: UnderlineInputBorder(
-                            borderSide: BorderSide(color: theme.dividerColor),
+                            borderSide: BorderSide(
+                              color: Theme.of(context).dividerColor,
+                            ),
                           ),
                           focusedBorder: UnderlineInputBorder(
-                            borderSide: BorderSide(color: theme.primaryColor),
+                            borderSide: BorderSide(
+                              color: Theme.of(context).primaryColor,
+                            ),
                           ),
                           suffixIcon: isChecking
                               ? const Padding(
@@ -6673,9 +9375,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       child: Text(
                         'İptal',
                         style: TextStyle(
-                          color: theme.textTheme.bodySmall?.color?.withOpacity(
-                            0.7,
-                          ),
+                          color: Theme.of(
+                            context,
+                          ).textTheme.bodySmall?.color?.withOpacity(0.7),
                         ),
                       ),
                     ),
@@ -6720,29 +9422,47 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        backgroundColor: themeService.isDarkMode ? const Color(0xFF1A1A1A) : Theme.of(context).colorScheme.surface,
+        backgroundColor: themeService.isDarkMode
+            ? const Color(0xFF1A1A1A)
+            : Theme.of(context).colorScheme.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(
           'Grup Adı Belirle',
-          style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            color: themeService.isDarkMode ? Colors.white : Colors.black87,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
               'Harika bir grup adı ile başla.',
-              style: TextStyle(color: themeService.isDarkMode ? Colors.white70 : Colors.black54, fontSize: 13),
+              style: TextStyle(
+                color: themeService.isDarkMode
+                    ? Colors.white70
+                    : Colors.black54,
+                fontSize: 13,
+              ),
             ),
             const SizedBox(height: 16),
             TextField(
               controller: nameController,
               autofocus: true,
-              style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+              style: TextStyle(
+                color: themeService.isDarkMode ? Colors.white : Colors.black87,
+              ),
               decoration: InputDecoration(
                 hintText: 'Örn: Gelecek Planları',
-                hintStyle: TextStyle(color: themeService.isDarkMode ? Colors.white24 : Colors.black38),
+                hintStyle: TextStyle(
+                  color: themeService.isDarkMode
+                      ? Colors.white24
+                      : Colors.black38,
+                ),
                 filled: true,
-                fillColor: themeService.isDarkMode ? Colors.white.withOpacity(0.05) : Colors.grey[100],
+                fillColor: themeService.isDarkMode
+                    ? Colors.white.withOpacity(0.05)
+                    : Colors.grey[100],
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
@@ -6756,7 +9476,11 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             onPressed: () => Navigator.pop(context),
             child: Text(
               'Vazgeç',
-              style: TextStyle(color: themeService.isDarkMode ? Colors.white54 : Colors.black54),
+              style: TextStyle(
+                color: themeService.isDarkMode
+                    ? Colors.white54
+                    : Colors.black54,
+              ),
             ),
           ),
           ElevatedButton(
@@ -6792,7 +9516,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: themeService.isDarkMode ? const Color(0xFF1E1E1E) : Theme.of(context).colorScheme.surface,
+        backgroundColor: themeService.isDarkMode
+            ? const Color(0xFF1E1E1E)
+            : Theme.of(context).colorScheme.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(
           '$groupName Oluşturuluyor',
@@ -6804,12 +9530,22 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
         content: Text(
           'Bu şuanki sohbetinizi grup sohbeti yapar. Bellekleriniz ve promptlarınız grup sohbetlerinde kesinlikle kullanılmaz.',
-          style: TextStyle(color: themeService.isDarkMode ? Colors.white70 : Colors.black54, fontSize: 13),
+          style: TextStyle(
+            color: themeService.isDarkMode ? Colors.white70 : Colors.black54,
+            fontSize: 13,
+          ),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('İptal', style: TextStyle(color: themeService.isDarkMode ? Colors.white54 : Colors.black54)),
+            child: Text(
+              'İptal',
+              style: TextStyle(
+                color: themeService.isDarkMode
+                    ? Colors.white54
+                    : Colors.black54,
+              ),
+            ),
           ),
           ElevatedButton(
             onPressed: () async {
@@ -6883,7 +9619,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        backgroundColor: themeService.isDarkMode ? const Color(0xFF1E1E1E) : Theme.of(context).colorScheme.surface,
+        backgroundColor: themeService.isDarkMode
+            ? const Color(0xFF1E1E1E)
+            : Theme.of(context).colorScheme.surface,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(
           'Grup linkiniz',
@@ -6899,9 +9637,15 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               decoration: BoxDecoration(
-                color: themeService.isDarkMode ? Colors.black38 : Colors.grey[100],
+                color: themeService.isDarkMode
+                    ? Colors.black38
+                    : Colors.grey[100],
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: themeService.isDarkMode ? Colors.white10 : Colors.grey[300]!),
+                border: Border.all(
+                  color: themeService.isDarkMode
+                      ? Colors.white10
+                      : Colors.grey[300]!,
+                ),
               ),
               child: Row(
                 children: [
@@ -6925,7 +9669,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                     child: Icon(
                       Icons.copy,
-                      color: themeService.isDarkMode ? Colors.white70 : Colors.black54,
+                      color: themeService.isDarkMode
+                          ? Colors.white70
+                          : Colors.black54,
                       size: 20,
                     ),
                   ),
@@ -6936,7 +9682,9 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                     child: Icon(
                       Icons.share,
-                      color: themeService.isDarkMode ? Colors.white70 : Colors.black54,
+                      color: themeService.isDarkMode
+                          ? Colors.white70
+                          : Colors.black54,
                       size: 20,
                     ),
                   ),
@@ -6949,8 +9697,10 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           TextButton(
             onPressed: () => Navigator.pop(context),
             child: Text(
-              'Kapat', 
-              style: TextStyle(color: themeService.isDarkMode ? Colors.white : Colors.black87),
+              'Kapat',
+              style: TextStyle(
+                color: themeService.isDarkMode ? Colors.white : Colors.black87,
+              ),
             ),
           ),
         ],
@@ -7744,8 +10494,445 @@ class ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  void openChatFromDeepLink(String chatId) {
+    if (!mounted) return;
+    final chatIndex = _chats.indexWhere((c) => c.id == chatId);
+    if (chatIndex != -1) {
+      _handleChatSelected(_chats[chatIndex]);
+    } else {
+      GreyNotification.show(context, 'Sohbet bulunamadı veya silinmiş');
+    }
+  }
+
+  void focusInputFromQuickAction() {
+    if (!mounted) return;
+    _messageFocusNode.requestFocus();
+  }
+
+  void _showAttachmentOptions() {
+    if (!mounted) return;
+    _pickImage();
+  }
+
+  void openCameraFromQuickAction() {
+    if (!mounted) return;
+    _pickFromCamera();
+  }
+
+  void handleQuickAiAction(String action) {
+    if (!mounted) return;
+    // Inputa odaklan ve klavyeyi aç
+    focusInputFromQuickAction();
+
+    if (action == 'attach') {
+      // Bir gecikme ekle ki input odağı ve klavye çakışmasın
+      Future.delayed(const Duration(milliseconds: 300), () {
+        _showAttachmentOptions();
+      });
+    }
+  }
+
+  void openStatsFromDeepLink() {
+    if (!mounted) return;
+    _openSettings();
+  }
+
   // Check if user has sent at least one message in the chat
   bool _hasUserSentMessage(Chat chat) {
     return chat.messages.any((message) => message.isUser);
+  }
+
+  Future<Map<String, dynamic>?> _handleIncomingToolCall(
+    String name,
+    Map<String, dynamic> args,
+    String toolCallId,
+    String? aiMessageId,
+    String chatId,
+    bool isFinal,
+  ) async {
+    if (!mounted) return null;
+
+    // 1. Durum güncellemesi: "Loading" göster (Sadece isFinal false ise UI için)
+    if (!isFinal) {
+      _loadingMessage = 'Aranıyor...';
+      String loadingTitle = 'Hazırlanıyor...';
+      if (name == 'create_gmail_draft') {
+        final to = args['to'] ?? 'birine';
+        loadingTitle = 'Mail taslağı hazırlanıyor ($to)...';
+      } else if (name == 'read_gmail_inbox') {
+        final q = args['query'] ?? 'tümü';
+        loadingTitle = 'E-postalar taranıyor ($q)...';
+      } else if (name == 'list_github_repos') {
+        loadingTitle = 'GitHub depoları listeleniyor...';
+      } else if (name == 'read_github_repo') {
+        final repo = args['repo'] ?? 'repo';
+        final path = args['path'] ?? '';
+        loadingTitle =
+            '$repo analiz ediliyor${path.isNotEmpty ? ' / $path' : ''}...';
+      }
+
+      _updateMessageToolState(aiMessageId, chatId, {
+        'toolCallId': toolCallId,
+        'toolCallName': name,
+        'status': 'loading',
+        'title': loadingTitle,
+        'showApprove': false,
+      });
+      return null;
+    }
+
+    // 2. Aracı çalıştır
+    try {
+      Map<String, dynamic> result = {};
+      Map<String, dynamic> toolOutput = {}; // AI'a gidecek ham sonuç
+
+      if (name == 'create_gmail_draft') {
+        final to = args['to'] ?? '';
+        final subject = args['subject'] ?? 'Konu Yok';
+        result = await _gmailService.createDraft(
+          to: to,
+          subject: subject,
+          body: args['body'] ?? '',
+        );
+        toolOutput = result;
+        result['toolCallName'] = name;
+        result['args'] = args;
+        result['showApprove'] = true;
+        result['status'] = 'done';
+        result['title'] = 'Taslak: $subject';
+        result['subtitle'] = 'Alıcı: $to';
+      } else if (name == 'read_github_repo') {
+        final owner = args['owner'] ?? '';
+        final repo = args['repo'] ?? '';
+        final path = args['path'] ?? '';
+        result = await _githubService.getRepoContent(
+          owner: owner,
+          repo: repo,
+          path: path,
+        );
+        toolOutput = result;
+        result['toolCallName'] = name;
+        result['showApprove'] = false; // GitHub okuma için onaya gerek yok
+        result['status'] = 'done';
+        result['title'] = '$owner/$repo Analiz Edildi';
+        if (path.isNotEmpty) {
+          result['subtitle'] = 'Dosya: $path';
+        }
+      } else if (name == 'read_gmail_inbox') {
+        final query = args['query'] as String?; // Optional now
+        final pageToken = args['pageToken'] as String?;
+        final inboxResult = await _gmailService.readInbox(
+          query: query,
+          maxResults: args['maxResults'] ?? 5,
+          pageToken: pageToken,
+        );
+        final messages = inboxResult['messages'] as List<Map<String, dynamic>>;
+        final nextPageToken = inboxResult['nextPageToken'];
+
+        toolOutput = {'messages': messages, 'nextPageToken': nextPageToken};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': query != null && query.isNotEmpty
+              ? 'Gmail: "$query"'
+              : 'Gmail Gelen Kutusu',
+          'subtitle':
+              '${messages.length} mail bulundu${nextPageToken != null ? ' (Devamı var)' : ''}',
+          'showApprove': false,
+        };
+      } else if (name == 'search_gmail') {
+        final query = args['query'] as String;
+        final pageToken = args['pageToken'] as String?;
+        final searchResult = await _gmailService.searchEmails(
+          query: query,
+          maxResults: args['maxResults'] ?? 5,
+          pageToken: pageToken,
+        );
+        final messages = searchResult['messages'] as List<Map<String, dynamic>>;
+        final nextPageToken = searchResult['nextPageToken'];
+
+        toolOutput = {'messages': messages, 'nextPageToken': nextPageToken};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': 'Gmail Arama: "$query"',
+          'subtitle':
+              '${messages.length} sonuç${nextPageToken != null ? ' (Devamı var)' : ''}',
+          'showApprove': false,
+        };
+      } else if (name == 'list_github_repos' ||
+          name == 'get_github_user_repos') {
+        final username = args['username'] as String?;
+        final page = args['page'] as int? ?? 1;
+        final perPage = args['perPage'] as int? ?? 10;
+
+        final repos = await _githubService.getUserRepos(
+          username: username,
+          page: page,
+          perPage: perPage,
+        );
+        toolOutput = {'repositories': repos};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': username != null
+              ? '$username Repoları'
+              : 'Sizin Repolarınız',
+          'subtitle': '${repos.length} repo listelendi',
+          'showApprove': false,
+        };
+      } else if (name == 'get_github_starred_repos') {
+        final username = args['username'] as String?;
+        final page = args['page'] as int? ?? 1;
+
+        final repos = await _githubService.getStarredRepos(
+          username: username,
+          page: page,
+        );
+        toolOutput = {'repositories': repos};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': username != null
+              ? '$username Yıldızladıkları'
+              : 'Yıldızlı Repolarınız',
+          'subtitle': '${repos.length} repo listelendi',
+          'showApprove': false,
+        };
+      } else if (name == 'star_github_repo') {
+        final owner = args['owner'] as String;
+        final repo = args['repo'] as String;
+        await _githubService.starRepo(owner, repo);
+
+        toolOutput = {'status': 'success', 'message': 'Repo starred'};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': 'Repo Yıldızlandı',
+          'subtitle': '$owner/$repo',
+          'showApprove': false,
+        };
+      } else if (name == 'unstar_github_repo') {
+        final owner = args['owner'] as String;
+        final repo = args['repo'] as String;
+        await _githubService.unstarRepo(owner, repo);
+
+        toolOutput = {'status': 'success', 'message': 'Repo unstarred'};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': 'Yıldız Kaldırıldı',
+          'subtitle': '$owner/$repo',
+          'showApprove': false,
+        };
+      } else if (name == 'read_outlook_inbox') {
+        final query = args['query'] as String?;
+        final maxResults = args['maxResults'] as int? ?? 5;
+
+        final resultData = await OutlookService.instance.readInbox(
+          query: query,
+          maxResults: maxResults,
+        );
+        final messages = resultData['messages'] as List;
+
+        toolOutput = {'messages': messages};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': query != null ? 'Outlook: "$query"' : 'Outlook Gelen Kutusu',
+          'subtitle': '${messages.length} mail bulundu',
+          'showApprove': false,
+        };
+      } else if (name == 'send_outlook_email') {
+        final to = args['to'] as String;
+        final subject = args['subject'] as String;
+        final body = args['body'] as String;
+
+        await OutlookService.instance.sendEmail(
+          to: to,
+          subject: subject,
+          body: body,
+        );
+
+        toolOutput = {'status': 'success', 'message': 'Email sent'};
+        result = {
+          'toolCallName': name,
+          'status': 'done',
+          'title': 'Outlook E-posta Gönderildi',
+          'subtitle': 'Kime: $to',
+          'showApprove': false,
+        };
+      }
+
+      if (aiMessageId != null) {
+        _updateMessageToolState(aiMessageId, chatId, result);
+      }
+      return toolOutput;
+    } catch (e) {
+      if (aiMessageId != null) {
+        _updateMessageToolState(aiMessageId, chatId, {
+          'status': 'error',
+          'title': 'Hata oluştu',
+          'subtitle': e.toString(),
+        });
+      }
+      return {'error': e.toString()};
+    }
+  }
+
+  void _updateMessageToolState(
+    String? msgId,
+    String chatId,
+    Map<String, dynamic> toolData,
+  ) {
+    if (msgId == null) return;
+    setState(() {
+      final chatIndex = _chats.indexWhere((c) => c.id == chatId);
+      if (chatIndex != -1) {
+        final messages = [..._chats[chatIndex].messages];
+        final idx = messages.indexWhere((m) => m.id == msgId);
+        if (idx != -1) {
+          final currentMetadata = Map<String, dynamic>.from(
+            messages[idx].metadata ?? {},
+          );
+          currentMetadata['toolCall'] = toolData;
+          messages[idx] = messages[idx].copyWith(metadata: currentMetadata);
+          _chats[chatIndex] = _chats[chatIndex].copyWith(messages: messages);
+          if (_currentChat?.id == chatId) _currentChat = _chats[chatIndex];
+        }
+      }
+    });
+    _storageService.saveChats(_chats);
+  }
+
+  void _detectControlTagsStreaming(String text) {
+    // 1. Artifact Detection
+    if (text.contains('[ARTIFACT')) {
+      // Find the latest artifact block
+      final lastTagIndex = text.lastIndexOf('[ARTIFACT');
+      final closingTagIndex = text.lastIndexOf('[/ARTIFACT]');
+
+      if (lastTagIndex != -1) {
+        final tagEndBracket = text.indexOf(']', lastTagIndex);
+        if (tagEndBracket != -1) {
+          final tagContent = text.substring(lastTagIndex, tagEndBracket + 1);
+          final contentStart = tagEndBracket + 1;
+
+          String content;
+          bool isComplete = false;
+          if (closingTagIndex != -1 && closingTagIndex > lastTagIndex) {
+            content = text.substring(contentStart, closingTagIndex).trim();
+            isComplete = true;
+          } else {
+            // Still streaming, take everything after tag
+            content = text.substring(contentStart).trim();
+          }
+
+          // Extract title and lang from tagContent
+          final titleMatch = RegExp(r'title="([^"]*)"').firstMatch(tagContent);
+          final langMatch = RegExp(r'lang="([^"]*)"').firstMatch(tagContent);
+
+          final title = titleMatch?.group(1) ?? 'Artifact';
+          final lang = langMatch?.group(1) ?? 'text';
+
+          if (content != _artifactContent ||
+              !_isArtifactsPanelOpen ||
+              isComplete) {
+            setState(() {
+              _artifactContent = content;
+              _artifactTitle = title;
+              _artifactLanguage = lang;
+              _isArtifactsPanelOpen = true;
+            });
+          }
+        }
+      }
+    }
+
+    final imgenRegex = RegExp(
+      r'\[İ?MGEN\]\s*:?\s*([^\]\n]+)',
+      caseSensitive: false,
+    );
+
+    // 3. Manual Reasoning Detection (New)
+    final reasonRegex = RegExp(
+      r'\[REASON\]\s*:?\s*([^\]\n]+)',
+      caseSensitive: false,
+    );
+
+    final reasonMatch = reasonRegex.firstMatch(text);
+    if (reasonMatch != null) {
+      final content = reasonMatch.group(1)?.trim() ?? '';
+      if (content.isNotEmpty) {
+        final tagId = 'reason_$content';
+        if (!_handledControlTags.contains(tagId)) {
+          _handledControlTags.add(tagId);
+          setState(() {
+            _agentThinking += (_agentThinking.isEmpty ? '' : '\n') + content;
+            if (_loadingMessage == 'Düşünüyor...') {
+              _loadingMessage = 'Derin düşünüyor...';
+            }
+          });
+        }
+      }
+    }
+
+    final imgenMatch = imgenRegex.firstMatch(text);
+    if (imgenMatch != null) {
+      final prompt = imgenMatch.group(1)?.trim() ?? '';
+      if (prompt.isNotEmpty) {
+        final tagId = 'imgen_$prompt';
+        if (!_handledControlTags.contains(tagId)) {
+          _handledControlTags.add(tagId);
+          if (mounted) {
+            setState(() {
+              _isGeneratingImage = true;
+              _loadingMessage = 'Görsel oluşturuluyor...';
+              // Metin olarak da göster ki skeleton tetiklensin
+              _currentTypingText = 'Görsel oluşturuluyor...';
+            });
+          }
+          _handleImgenTrigger(prompt);
+        }
+      }
+    }
+  }
+
+  Future<void> _sendBackgroundToolRequest({required String instruction}) async {
+    if (_currentChat == null) return;
+    final targetChatId = _currentChat!.id;
+
+    final history = _currentChat!.messages
+        .map(
+          (m) => {
+            'role': m.isUser ? 'user' : 'assistant',
+            'content': m.content,
+          },
+        )
+        .toList();
+
+    try {
+      await _openRouterService.sendMessageWithHistoryStream(
+        history, // Position 1: History
+        instruction, // Position 2: New instruction
+        onToken: (text) {
+          // Do nothing, we don't want to show this in UI
+        },
+        shouldStop: () => false,
+        onToolCall: (name, args, id, isFinal) async {
+          // Pass null for aiMessageId to signal background mode
+          return await _handleIncomingToolCall(
+            name,
+            args,
+            id,
+            null, // This is the key: null aiMessageId
+            targetChatId,
+            isFinal,
+          );
+        },
+      );
+    } catch (e) {
+      debugPrint("Background tool request error: $e");
+    }
   }
 }

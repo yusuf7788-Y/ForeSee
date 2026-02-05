@@ -55,7 +55,7 @@ class _ForeSettingsScreenState extends State<ForeSettingsScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF0A0A0A),
         title: const Text(
-          'ForeWeb Ayarları',
+          'ForWeb Ayarları',
           style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         iconTheme: const IconThemeData(color: Colors.white),
@@ -83,13 +83,41 @@ class _ForeSettingsScreenState extends State<ForeSettingsScreen> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      _buildSettingTile('JavaScript', 'Sitelerin JavaScript çalıştırmasına izin ver', 'javascript'),
-                      _buildSettingTile('Otomatik Oynatma', 'Videoları otomatik oynat', 'autoplay'),
-                      _buildSettingTile('Resim Yükleme', 'Resimleri otomatik yükle', 'images'),
-                      _buildSettingTile('Pop-up\'ları Engelle', 'Pop-up pencereleri engelle', 'popups'),
-                      _buildSettingTile('Konum Servisi', 'Konum servislerini kullan', 'location'),
-                      _buildSettingTile('Kamera Erişimi', 'Kamera erişimine izin ver', 'camera'),
-                      _buildSettingTile('Mikrofon Erişimi', 'Mikrofon erişimine izin ver', 'microphone'),
+                      _buildSettingTile(
+                        'JavaScript',
+                        'Sitelerin JavaScript çalıştırmasına izin ver',
+                        'javascript',
+                      ),
+                      _buildSettingTile(
+                        'Otomatik Oynatma',
+                        'Videoları otomatik oynat',
+                        'autoplay',
+                      ),
+                      _buildSettingTile(
+                        'Resim Yükleme',
+                        'Resimleri otomatik yükle',
+                        'images',
+                      ),
+                      _buildSettingTile(
+                        'Pop-up\'ları Engelle',
+                        'Pop-up pencereleri engelle',
+                        'popups',
+                      ),
+                      _buildSettingTile(
+                        'Konum Servisi',
+                        'Konum servislerini kullan',
+                        'location',
+                      ),
+                      _buildSettingTile(
+                        'Kamera Erişimi',
+                        'Kamera erişimine izin ver',
+                        'camera',
+                      ),
+                      _buildSettingTile(
+                        'Mikrofon Erişimi',
+                        'Mikrofon erişimine izin ver',
+                        'microphone',
+                      ),
                     ],
                   ),
                 ),

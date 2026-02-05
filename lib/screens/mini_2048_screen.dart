@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../services/storage_service.dart';
 import '../models/player_inventory.dart';
 import '../services/shop_service.dart';
@@ -25,8 +26,12 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
   Offset _dragTotal = Offset.zero;
   bool _didMoveInDrag = false;
 
+  // Render Objects
+  final List<Particle> _particles = [];
+  bool _particlesEnabled = false;
+
   // Customization
-  String _fontFamily = 'sans-serif';
+  String _fontKey = 'default'; // 'default'
   Map<int, Color> _colorScheme = {};
 
   @override
@@ -39,18 +44,38 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
 
   Future<void> _loadCustomizations() async {
     final inventory = await _storageService.loadPlayerInventory();
-    final equippedFontId = inventory.equippedItems[GameId.game2048.toString()]?[ItemType.fontStyle.toString()];
-    final equippedColorId = inventory.equippedItems[GameId.game2048.toString()]?[ItemType.cardColor.toString()];
+    final equippedFontId =
+        inventory.equippedItems[GameId.game2048.toString()]?[ItemType.fontStyle
+            .toString()];
+    final equippedEffectId = inventory
+        .equippedItems[GameId.game2048.toString()]?[ItemType.effect.toString()];
+
+    final equippedColorId =
+        inventory.equippedItems[GameId.game2048.toString()]?[ItemType.cardColor
+            .toString()];
 
     if (equippedFontId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedFontId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedFontId,
+      );
       if (shopItem.value is String) {
-        _fontFamily = shopItem.value;
+        _fontKey = shopItem.value;
+      }
+    }
+
+    if (equippedEffectId != null) {
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedEffectId,
+      );
+      if (shopItem.value == 'explosion') {
+        _particlesEnabled = true;
       }
     }
 
     if (equippedColorId != null) {
-      final shopItem = _shopService.allItems.firstWhere((item) => item.id == equippedColorId);
+      final shopItem = _shopService.allItems.firstWhere(
+        (item) => item.id == equippedColorId,
+      );
       if (shopItem.value == 'neon') {
         _colorScheme = _getNeonColors();
       }
@@ -67,7 +92,106 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     _gameOver = false;
     _addRandomTile();
     _addRandomTile();
+    // Start animation loop for particles
+    if (_particlesEnabled) {
+      _tickParticles();
+    }
     setState(() {});
+  }
+
+  void _tickParticles() {
+    if (!mounted) return;
+    if (_particles.isNotEmpty) {
+      setState(() {
+        _particles.removeWhere((p) => p.isDead);
+        for (var p in _particles) {
+          p.update();
+        }
+      });
+      Future.delayed(const Duration(milliseconds: 16), _tickParticles);
+    } else {
+      Future.delayed(
+        const Duration(milliseconds: 100),
+        _tickParticles,
+      ); // Idle check
+    }
+  }
+
+  void _spawnExplosion(int r, int c, Color color) {
+    if (!_particlesEnabled) return;
+    for (int i = 0; i < 20; i++) {
+      _particles.add(Particle(r: r, c: c, color: color));
+    }
+  }
+
+  /// Çıkış onayı için dialog göster
+  Future<bool> _showExitConfirmation() async {
+    if (_score == 0) return true; // Skor yoksa direkt çık
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF020617),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Çıkmak istediğine emin misin?',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          'Şu anki skorun: $_score\nÇıkarsan bu skoru kaybedecek ve FsCoin kazanamayacaksın.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('İptal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Çık', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  /// Sıfırlama onayı için dialog göster
+  Future<void> _showResetConfirmation() async {
+    if (_score == 0) {
+      _startNewGame();
+      return;
+    }
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF020617),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Oyunu sıfırlamak istediğine emin misin?',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: Text(
+          'Şu anki skorun: $_score\nSıfırlarsan bu skoru kaybedecek ve FsCoin kazanamayacaksın.',
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('İptal'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text(
+              'Sıfırla',
+              style: TextStyle(color: Colors.orangeAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (result == true) {
+      _startNewGame();
+    }
   }
 
   void _addRandomTile() {
@@ -121,7 +245,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     bool moved = false;
     for (int r = 0; r < _size; r++) {
       final row = _board[r];
-      final result = _compressAndMerge(row);
+      final result = _compressAndMerge(row, r, true); // true for isRow
       _board[r] = result.row;
       moved = moved || result.moved;
     }
@@ -136,7 +260,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     bool moved = false;
     for (int r = 0; r < _size; r++) {
       final reversed = _board[r].reversed.toList();
-      final result = _compressAndMerge(reversed);
+      final result = _compressAndMerge(reversed, r, true, revert: true);
       _board[r] = result.row.reversed.toList();
       moved = moved || result.moved;
     }
@@ -151,7 +275,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     bool moved = false;
     for (int c = 0; c < _size; c++) {
       final col = List<int>.generate(_size, (r) => _board[r][c]);
-      final result = _compressAndMerge(col);
+      final result = _compressAndMerge(col, c, false); // false for isRow
       for (int r = 0; r < _size; r++) {
         _board[r][c] = result.row[r];
       }
@@ -167,8 +291,11 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
   void _moveDown() {
     bool moved = false;
     for (int c = 0; c < _size; c++) {
-      final col = List<int>.generate(_size, (r) => _board[r][c]).reversed.toList();
-      final result = _compressAndMerge(col);
+      final col = List<int>.generate(
+        _size,
+        (r) => _board[r][c],
+      ).reversed.toList();
+      final result = _compressAndMerge(col, c, false, revert: true);
       final newCol = result.row.reversed.toList();
       for (int r = 0; r < _size; r++) {
         _board[r][c] = newCol[r];
@@ -182,24 +309,67 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     }
   }
 
-  _MoveResult _compressAndMerge(List<int> row) {
-    final original = List<int>.from(row);
-    // Sıfırları at ve sıkıştır
-    final compressed = row.where((v) => v != 0).toList();
-    // Merge
-    for (int i = 0; i < compressed.length - 1; i++) {
-      if (compressed[i] != 0 && compressed[i] == compressed[i + 1]) {
-        compressed[i] *= 2;
-        _score += compressed[i];
-        compressed[i + 1] = 0;
+  _MoveResult _compressAndMerge(
+    List<int> line,
+    int index,
+    bool isRow, {
+    bool revert = false,
+  }) {
+    // 1. Remove zeros
+    List<int> newLine = line.where((e) => e != 0).toList();
+
+    // 2. Merge adjacent
+    bool moved = false;
+    for (int i = 0; i < newLine.length - 1; i++) {
+      if (newLine[i] == newLine[i + 1]) {
+        newLine[i] *= 2;
+        _score += newLine[i];
+
+        // Spawn explosion
+        if (_particlesEnabled) {
+          int displayIndex = i;
+          if (revert) {
+            displayIndex = _size - 1 - i;
+          }
+
+          int r = 0, c = 0;
+          if (isRow) {
+            r = index;
+            c = displayIndex;
+          } else {
+            r = displayIndex;
+            c = index;
+          }
+          _spawnExplosion(r, c, _getTileColor(newLine[i]));
+        }
+
+        newLine.removeAt(i + 1);
+        moved = true;
       }
     }
-    final merged = compressed.where((v) => v != 0).toList();
-    while (merged.length < _size) {
-      merged.add(0);
+
+    // 3. Fill zeros
+    while (newLine.length < _size) {
+      newLine.add(0);
     }
-    final moved = !_listEquals(original, merged);
-    return _MoveResult(row: merged, moved: moved);
+
+    // Check if distinct from original (ignoring trailing zeros if only shift happened)
+    // Because we just reconstructed newLine, let's compare with input 'line' carefully.
+    // Actually, simple list comparison is fine if we ensure 'line' is full size logic.
+    if (!moved) {
+      if (line.length == newLine.length) {
+        for (int i = 0; i < _size; i++) {
+          if (line[i] != newLine[i]) {
+            moved = true;
+            break;
+          }
+        }
+      } else {
+        moved = true; // Should not happen if well formed
+      }
+    }
+
+    return _MoveResult(row: newLine, moved: moved);
   }
 
   bool _listEquals(List<int> a, List<int> b) {
@@ -244,7 +414,9 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     final int coinsEarned = (_score / 20).round();
     if (coinsEarned > 0) {
       PlayerInventory inventory = await _storageService.loadPlayerInventory();
-      final updatedInventory = inventory.copyWith(fsCoinBalance: inventory.fsCoinBalance + coinsEarned);
+      final updatedInventory = inventory.copyWith(
+        fsCoinBalance: inventory.fsCoinBalance + coinsEarned,
+      );
       await _storageService.savePlayerInventory(updatedInventory);
     }
 
@@ -304,7 +476,11 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                     child: IconButton(
                       icon: const Icon(Icons.arrow_back, color: Colors.white),
                       iconSize: 20,
-                      onPressed: () => Navigator.of(context).pop(),
+                      onPressed: () async {
+                        if (await _showExitConfirmation()) {
+                          Navigator.of(context).pop();
+                        }
+                      },
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -322,10 +498,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                       SizedBox(height: 2),
                       Text(
                         'Renkli kareleri birleştir',
-                        style: TextStyle(
-                          color: Colors.white38,
-                          fontSize: 12,
-                        ),
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                     ],
                   ),
@@ -335,8 +508,10 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
               Row(
                 children: [
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.white10,
                       borderRadius: BorderRadius.circular(16),
@@ -351,10 +526,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                         const SizedBox(width: 6),
                         const Text(
                           'Skor',
-                          style: TextStyle(
-                            color: Colors.white70,
-                            fontSize: 12,
-                          ),
+                          style: TextStyle(color: Colors.white70, fontSize: 12),
                         ),
                         const SizedBox(width: 4),
                         Text(
@@ -372,7 +544,9 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                   if (_gameOver)
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.redAccent.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(12),
@@ -398,37 +572,45 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                     child: AspectRatio(
                       aspectRatio: 1,
                       child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(24),
-                        gradient: const LinearGradient(
-                          colors: [
-                            Color(0xFF020617),
-                            Color(0xFF111827),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(24),
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF020617), Color(0xFF111827)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          border: Border.all(color: Colors.white10),
+                        ),
+                        padding: const EdgeInsets.all(12),
+                        child: Stack(
+                          children: [
+                            GridView.builder(
+                              physics: const NeverScrollableScrollPhysics(),
+                              gridDelegate:
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: _size,
+                                    mainAxisSpacing: 8,
+                                    crossAxisSpacing: 8,
+                                  ),
+                              itemCount: _size * _size,
+                              itemBuilder: (context, index) {
+                                final r = index ~/ _size;
+                                final c = index % _size;
+                                final value = _board[r][c];
+                                return _buildTile(value);
+                              },
+                            ),
+                            if (_particlesEnabled && _particles.isNotEmpty)
+                              IgnorePointer(
+                                child: CustomPaint(
+                                  size: Size.infinite,
+                                  painter: _ParticlePainter(_particles, _size),
+                                ),
+                              ),
                           ],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
                         ),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      padding: const EdgeInsets.all(12),
-                      child: GridView.builder(
-                        physics: const NeverScrollableScrollPhysics(),
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: _size,
-                          mainAxisSpacing: 8,
-                          crossAxisSpacing: 8,
-                        ),
-                        itemCount: _size * _size,
-                        itemBuilder: (context, index) {
-                          final r = index ~/ _size;
-                          final c = index % _size;
-                          final value = _board[r][c];
-                          return _buildTile(value);
-                        },
                       ),
                     ),
-                  ),
                   ),
                 ),
               ),
@@ -437,7 +619,7 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   TextButton(
-                    onPressed: _startNewGame,
+                    onPressed: _showResetConfirmation,
                     child: const Text('Sıfırla'),
                   ),
                 ],
@@ -449,8 +631,12 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
     );
   }
 
+  Color _getTileColor(int value) {
+    return _colorScheme[value] ?? const Color(0xFF22C55E);
+  }
+
   Widget _buildTile(int value) {
-    final bg = _colorScheme[value] ?? const Color(0xFF22C55E);
+    final bg = _getTileColor(value);
     final isDarkText = value <= 4;
 
     return Container(
@@ -470,15 +656,44 @@ class _Mini2048ScreenState extends State<Mini2048Screen> {
       child: Center(
         child: Text(
           value == 0 ? '' : '$value',
-          style: TextStyle(
-            fontFamily: _fontFamily,
-            color: isDarkText ? Colors.black : Colors.white,
-            fontSize: value < 128 ? 20 : 16,
-            fontWeight: FontWeight.w700,
-          ),
+          style: _getTileTextStyle(value, isDarkText),
         ),
       ),
     );
+  }
+
+  /// Font key'e göre GoogleFonts ile TextStyle döndür
+  TextStyle _getTileTextStyle(int value, bool isDarkText) {
+    final color = isDarkText ? Colors.black : Colors.white;
+    final fontSize = value < 128 ? 20.0 : 16.0;
+    const fontWeight = FontWeight.w700;
+
+    switch (_fontKey) {
+      case 'roboto':
+        return GoogleFonts.roboto(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: fontWeight,
+        );
+      case 'poppins':
+        return GoogleFonts.poppins(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: fontWeight,
+        );
+      case 'orbitron':
+        return GoogleFonts.orbitron(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: fontWeight,
+        );
+      default:
+        return TextStyle(
+          color: color,
+          fontSize: fontSize,
+          fontWeight: fontWeight,
+        );
+    }
   }
 }
 
@@ -519,3 +734,57 @@ Map<int, Color> _getNeonColors() => {
   1024: const Color(0xFF00FFFF),
   2048: const Color(0xFFFF1493),
 };
+
+class Particle {
+  double x; // Relative to tile (0.0 to 1.0)
+  double y;
+  final int r; // Grid Row
+  final int c; // Grid Col
+  double vx;
+  double vy;
+  double life = 1.0;
+  final Color color;
+
+  Particle({required this.r, required this.c, required this.color})
+    : x = 0.5,
+      y = 0.5,
+      vx = (Random().nextDouble() - 0.5) * 0.1,
+      vy = (Random().nextDouble() - 0.5) * 0.1;
+
+  bool get isDead => life <= 0;
+
+  void update() {
+    x += vx;
+    y += vy;
+    life -= 0.05;
+  }
+}
+
+class _ParticlePainter extends CustomPainter {
+  final List<Particle> particles;
+  final int gridSize;
+
+  _ParticlePainter(this.particles, this.gridSize);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (particles.isEmpty) return;
+
+    final cellWidth = size.width / gridSize;
+    final cellHeight = size.height / gridSize;
+
+    for (var p in particles) {
+      final paint = Paint()
+        ..color = p.color.withOpacity(p.life)
+        ..style = PaintingStyle.fill;
+
+      final double absX = (p.c * cellWidth) + (p.x * cellWidth);
+      final double absY = (p.r * cellHeight) + (p.y * cellHeight);
+
+      canvas.drawCircle(Offset(absX, absY), 3 + (4 * p.life), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}

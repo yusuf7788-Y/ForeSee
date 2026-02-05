@@ -12,7 +12,20 @@
           "package_name": "com.ufine.foresee"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "367183399858-ukg5nafhq4preocqinmqugdi7l8htspf.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.ufine.foresee",
+            "certificate_hash": "3beb23e90b630df91c3ca86f5816dd2042ce5a76"
+          }
+        },
+        {
+          "client_id": "367183399858-jqlf0scvfh103m2vsur864v0lfelg4ut.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyA-dKnjPqNpJkhF5upKGGioK_jblMCxCCM"
@@ -20,7 +33,19 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "367183399858-jqlf0scvfh103m2vsur864v0lfelg4ut.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "367183399858-m1ffi26c4o8pk14jf8atfdsl4bdokqgp.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.ufine.foresee"
+              }
+            }
+          ]
         }
       }
     }
