@@ -131,6 +131,7 @@ Bu proje **MIT Lisansı** ile korunmaktadır. Ancak isim ve logo hakları saklı
   AI features in the prebuilt APK are also **disabled**.
 - **Language:**  
   The application is fully designed in **Turkish**.
+  
 ## Installation & Running the Project
 
 ### 1. Requirements
