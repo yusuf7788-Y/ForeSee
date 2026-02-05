@@ -1,10 +1,7 @@
 # ForeSee AI - Prodüktivite ve Yapay Zeka Platformu
 
-![ForeSee Logo](github-assets/logo.png)
-
 ## Geliştirici Bilgileri
 
-- **Şirket:** [Ufine](https://github.com/Ufine)
 - **Geliştirici:** [Yusuf7788-Y](https://github.com/yusuf7788-Y)
 
 ---
