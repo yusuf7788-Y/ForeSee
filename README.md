@@ -1,3 +1,4 @@
+
 ## Türkçe
 
 # ForeSee AI - Prodüktivite & Yapay Zeka Platformu
