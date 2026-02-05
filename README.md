@@ -61,37 +61,24 @@ flutter clean; flutter pub get; flutter run
 ## Ekran Görüntüleri
 
 ### 🌙 Dark Mode
-
-````carousel
-![Chat](github-assets/darkchat.png)
-<!-- slide -->
-![Sidebar](github-assets/darksidebar.png)
-<!-- slide -->
-![Search](github-assets/darksearch.png)
-<!-- slide -->
-![Trash](github-assets/darktrash.png)
-<!-- slide -->
-![Settings Up](github-assets/darksettingsup.png)
-<!-- slide -->
-![Settings Down](github-assets/darksettingsdown.png)
-````
+<p align="center">
+  <img src="github-assets/darkchat.png" width="300" alt="Chat"/>
+  <img src="github-assets/darksidebar.png" width="300" alt="Sidebar"/>
+  <img src="github-assets/darksearch.png" width="300" alt="Search"/>
+  <img src="github-assets/darktrash.png" width="300" alt="Trash"/>
+  <img src="github-assets/darksettingsup.png" width="300" alt="Settings Up"/>
+  <img src="github-assets/darksettingsdown.png" width="300" alt="Settings Down"/>
+</p>
 
 ### ☀️ Light Mode
-
-````carousel
-![Chat](github-assets/lightchat.png)
-<!-- slide -->
-![Sidebar](github-assets/lightsidebar.png)
-<!-- slide -->
-![Search](github-assets/lightsearch.png)
-<!-- slide -->
-![Trash](github-assets/lighttrash.png)
-<!-- slide -->
-![Settings Up](github-assets/lightsettingsup.png)
-<!-- slide -->
-![Settings Down](github-assets/lightsettingsdown.png)
-````
-
+<p align="center">
+  <img src="github-assets/lightchat.png" width="300" alt="Chat"/>
+  <img src="github-assets/lightsidebar.png" width="300" alt="Sidebar"/>
+  <img src="github-assets/lightsearch.png" width="300" alt="Search"/>
+  <img src="github-assets/lighttrash.png" width="300" alt="Trash"/>
+  <img src="github-assets/lightsettingsup.png" width="300" alt="Settings Up"/>
+  <img src="github-assets/lightsettingsdown.png" width="300" alt="Settings Down"/>
+</p>
 ## Güvenlik
 
 Bu proje üzerinden paylaşılan kodlarda hiçbir hassas API anahtarı yer almamaktadır. Tüm anahtarlar `.env` üzerinden yönetilmektedir.
