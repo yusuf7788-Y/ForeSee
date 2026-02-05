@@ -79,6 +79,7 @@ flutter clean; flutter pub get; flutter run
   <img src="github-assets/lightsettingsup.png" width="300" alt="Settings Up"/>
   <img src="github-assets/lightsettingsdown.png" width="300" alt="Settings Down"/>
 </p>
+
 ## Güvenlik
 
 Bu proje üzerinden paylaşılan kodlarda hiçbir hassas API anahtarı yer almamaktadır. Tüm anahtarlar `.env` üzerinden yönetilmektedir.
