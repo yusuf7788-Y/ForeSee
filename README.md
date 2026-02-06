@@ -169,9 +169,9 @@ flutter clean; flutter pub get; flutter run
 
 ## Screenshots
 
-🌙 Dark Mode
+### 🌙 Dark Mode
 <p align="center"> <img src="github-assets/darkchat.png" width="300" alt="Chat"/> <img src="github-assets/darksidebar.png" width="300" alt="Sidebar"/> <img src="github-assets/darksearch.png" width="300" alt="Search"/> <img src="github-assets/darktrash.png" width="300" alt="Trash"/> <img src="github-assets/darksettingsup.png" width="300" alt="Settings Up"/> <img src="github-assets/darksettingsdown.png" width="300" alt="Settings Down"/> </p>
-☀️ Light Mode
+### ☀️ Light Mode
 <p align="center"> <img src="github-assets/lightchat.png" width="300" alt="Chat"/> <img src="github-assets/lightsidebar.png" width="300" alt="Sidebar"/> <img src="github-assets/lightsearch.png" width="300" alt="Search"/> <img src="github-assets/lighttrash.png" width="300" alt="Trash"/> <img src="github-assets/lightsettingsup.png" width="300" alt="Settings Up"/> <img src="github-assets/lightsettingsdown.png" width="300" alt="Settings Down"/> </p>
 
 ## Security
